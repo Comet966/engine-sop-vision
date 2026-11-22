@@ -3,10 +3,12 @@
 from collections import defaultdict
 from dataclasses import dataclass
 
-from .cycle import MAX_FRAME_GAP_MS, SEAT_A, SEAT_B, FrameTime
+from .composite_rules import (
+    CompositeRule, EventAliasRule, ResolvedRules, SequenceRule, default_composite_rules, resolve_rules,
+)
+from .cycle import MAX_FRAME_GAP_MS, FrameTime
 from .event_rules import (
-    ActiveClose, CycleRules, Direction, InRule, MoveRule, OutRule, ParallelEvent, ParallelRule,
-    PrimitiveEvent, PrimitiveRules, Target, TrackedTarget,
+    ActiveClose, CompositeEvent, CycleRules, ParallelEvent, ParallelRule, PrimitiveEvent, PrimitiveRules, TrackedTarget,
 )
 from .models import DetectionFrame, WorkpieceCycleEvent
 
@@ -24,38 +26,20 @@ class Departure:
 
 
 class WorkpieceCycleComposer:
-    def __init__(self, rules: CycleRules, exit_x: float, primitives: PrimitiveRules | None) -> None:
-        self.rules = rules
-        self.exit_x = exit_x
-        base = primitives or PrimitiveRules(targets={}, events=[])
-        used = set(base.targets) | {rule.id for rule in (*base.events, *base.parallel)}
-        prefix = "cycle."
-        while any(name.startswith(prefix) for name in used):
-            prefix = "_" + prefix
-        self.seat_a = prefix + "seat_a"
-        self.seat_b = prefix + "seat_b"
-        self.in_rule = prefix + "a_in"
-        self.move_rule = prefix + "b_moves_left"
-        self.out_rule = prefix + "b_out_left"
-        exit_rule = OutRule(
-            id=self.out_rule, type="Out", target=self.seat_b, min_confidence=rules.min_confidence,
-            edge="left", left_edge_x=exit_x, edge_distance_ratio=0.018,
-            exit_window_ms=500, max_gap_ms=200,
-        )
-        self.out_confirmation_ms = exit_rule.missing_ms
-        self.primitives = base.model_copy(update={
-            "targets": {**base.targets, self.seat_a: Target(class_id=SEAT_A), self.seat_b: Target(class_id=SEAT_B)},
-            "events": [
-                *base.events,
-                InRule(id=self.in_rule, type="In", target=self.seat_a, min_confidence=rules.min_confidence),
-                MoveRule(
-                    id=self.move_rule, type="Move", target=self.seat_b, min_confidence=rules.min_confidence,
-                    window_ms=450, max_gap_ms=150, min_displacement_ratio=0.04,
-                    direction=Direction(angle_deg=180, tolerance_deg=35),
-                ),
-                exit_rule,
-            ],
-        })
+    def __init__(
+        self, rules: CycleRules | None, exit_x: float, primitives: PrimitiveRules | None,
+        *, resolved: ResolvedRules | None = None,
+    ) -> None:
+        if resolved is None:
+            cycle_config = default_composite_rules().model_copy(update={"events": []})
+            resolved = resolve_rules(cycle_config, primitives, exit_x, rules)
+        self.rules = resolved.cycle
+        self.exit_x = resolved.exit.left_edge_x
+        self.primitives = resolved.primitives
+        self.in_rule, self.move_rule, self.out_rule = resolved.enter.id, resolved.move.id, resolved.exit.id
+        self.seat_a, self.move_target, self.seat_b = resolved.enter.target, resolved.move.target, resolved.exit.target
+        self.exit_class = self.primitives.targets[self.seat_b].class_id
+        self.out_confirmation_ms = resolved.exit.missing_ms
         self.active: WorkpieceCycleEvent | None = None
         self.completed = 0
         self.started = 0
@@ -82,32 +66,32 @@ class WorkpieceCycleComposer:
         self.previous = now
         self.frame_size = size
 
-        visible = {box.class_id for box in frame.detections if box.confidence >= self.rules.min_confidence}
-        if SEAT_A in visible or SEAT_B in visible:
+        visible = {box.class_id for box in frame.detections if box.confidence >= self.rules.clear.min_confidence}
+        if visible & self.rules.clear.class_ids:
             if self.active is None and self.empty_since is not None:
                 duration = now.timestamp_ms - self.empty_since.timestamp_ms
-                if duration >= self.rules.empty_before_ms:
+                if duration >= self.rules.start.after_clear_ms:
                     self.arrival = Arrival(now, duration)
             self.empty_since = None
         else:
             self.empty_since = self.empty_since or now
-        if self.arrival and now.timestamp_ms - self.arrival.time.timestamp_ms > self.rules.a_wait_ms:
+        if self.arrival and now.timestamp_ms - self.arrival.time.timestamp_ms > self.rules.start.within_ms:
             self.arrival = None
 
         # An Out follows a confirmation delay. Keep the Move until it can be checked against the first missing frame.
-        cutoff = now.timestamp_ms - (self.rules.move_to_out_ms + self.out_confirmation_ms + MAX_FRAME_GAP_MS)
+        cutoff = now.timestamp_ms - (self.rules.end.within_ms + self.out_confirmation_ms + MAX_FRAME_GAP_MS)
         self.movements = {key: event for key, event in self.movements.items() if event.confirmed_ms >= cutoff}
         for event in events:
             if event.rule_id == self.move_rule:
-                self.movements[event.subjects[self.seat_b].track_id] = event
+                self.movements[event.subjects[self.move_target].track_id] = event
             elif event.rule_id == self.out_rule:
                 self._record_exit(event)
 
-        if SEAT_B in visible:
+        if self.exit_class in visible:
             self.pending_exit = None
         if self.pending_exit and self.empty_since:
             empty_ms = now.timestamp_ms - self.empty_since.timestamp_ms
-            if empty_ms >= self.rules.empty_after_ms:
+            if empty_ms >= self.rules.end.clear_ms:
                 return self._end(frame, empty_ms)
         if self.active is None and self.arrival is not None:
             for event in events:
@@ -121,7 +105,7 @@ class WorkpieceCycleComposer:
         if move is None or event.end_ms is None:
             return
         gap = event.end_ms - move.confirmed_ms
-        if not 0 <= gap <= self.rules.move_to_out_ms:
+        if not 0 <= gap <= self.rules.end.within_ms:
             return
         if self.active and self.active.start_frame_id is not None and move.confirmed_frame_id < self.active.start_frame_id:
             return
@@ -231,4 +215,118 @@ class ParallelEventDetector:
                 self.next_id += 1
             fired.add(key)
         self.fired[rule.id] = fired
+        return events
+
+
+@dataclass(frozen=True)
+class SequenceAttempt:
+    subjects: dict[str, TrackedTarget]
+    first_ms: int
+    evidence_ids: tuple[str, ...]
+
+
+class CompositeEventDetector:
+    def __init__(self, rules: list[CompositeRule]) -> None:
+        self.parallel = ParallelEventDetector([rule for rule in rules if isinstance(rule, ParallelRule)])
+        self.ordered_rules = [rule for rule in rules if not isinstance(rule, ParallelRule)]
+        self.attempts: dict[str, tuple[str | None, list[SequenceAttempt]]] = {}
+        self.previous: DetectionFrame | None = None
+        self.next_id = 1
+
+    def update(
+        self, frame: DetectionFrame, cycle: WorkpieceCycleEvent | None, primitives: list[PrimitiveEvent],
+    ) -> list[CompositeEvent]:
+        previous = self.previous
+        if previous is not None:
+            gap = frame.timestamp_ms - previous.timestamp_ms
+            if frame.frame_id <= previous.frame_id or gap < 0:
+                return []
+            if (frame.frame_id != previous.frame_id + 1 or gap > MAX_FRAME_GAP_MS
+                    or (frame.width, frame.height) != (previous.width, previous.height)):
+                self.attempts.clear()
+                self.parallel.fired.clear()
+        self.previous = frame
+
+        events: list[CompositeEvent] = list(self.parallel.update(frame, cycle))
+        if not self.ordered_rules:
+            return events
+        observed: dict[str, list[PrimitiveEvent | CompositeEvent]] = defaultdict(list)
+        for event in primitives:
+            if event.phase != "ended":
+                observed[event.rule_id].append(event)
+        for event in events:
+            observed[event.rule_id].append(event)
+        for rule in self.ordered_rules:
+            if rule.within_cycle and cycle is None:
+                self.attempts.pop(rule.id, None)
+                continue
+            cycle_id = cycle.cycle_id if rule.within_cycle and cycle else None
+            if isinstance(rule, EventAliasRule):
+                matches = [CompositeEvent(
+                    op="event", run_id=frame.run_id, rule_id=rule.id,
+                    occurrence_id=f"{frame.run_id}:event:{rule.id}:{event.occurrence_id}",
+                    cycle_id=cycle_id,
+                    subjects={rule.bind.get(alias, alias): subject for alias, subject in event.subjects.items()},
+                    start_ms=max(event.start_ms, (cycle.start_ms or 0) if cycle_id and cycle else 0),
+                    confirmed_ms=event.confirmed_ms, confirmed_frame_id=event.confirmed_frame_id,
+                    evidence_ids=[event.occurrence_id],
+                ) for event in observed[rule.event]]
+            else:
+                matches = self._sequence(frame, rule, cycle_id, observed)
+            events.extend(matches)
+            observed[rule.id].extend(matches)
+        return events
+
+    def _sequence(
+        self, frame: DetectionFrame, rule: SequenceRule, cycle_id: str | None,
+        observed: dict[str, list[PrimitiveEvent | CompositeEvent]],
+    ) -> list[CompositeEvent]:
+        old_cycle_id, previous = self.attempts.get(rule.id, (None, []))
+        previous = [
+            attempt for attempt in previous if cycle_id == old_cycle_id
+            and frame.timestamp_ms - attempt.first_ms <= rule.within_ms
+        ]
+        # Existing attempts represent earlier frames. New evidence can advance each by one step.
+        initial = SequenceAttempt({}, frame.timestamp_ms, ())
+        future = previous.copy()
+        completed = {}
+        consumed = set()
+        for attempt in (*previous, initial):
+            term = rule.steps[len(attempt.evidence_ids)]
+            for evidence in observed[term.event]:
+                subjects = {term.bind.get(alias, alias): target for alias, target in evidence.subjects.items()}
+                if any(attempt.subjects.get(alias, target) != target for alias, target in subjects.items()):
+                    continue
+                updated = SequenceAttempt(
+                    attempt.subjects | subjects, attempt.first_ms, (*attempt.evidence_ids, evidence.occurrence_id),
+                )
+                if len(updated.evidence_ids) == len(rule.steps):
+                    key = tuple(sorted((alias, target.track_id) for alias, target in updated.subjects.items()))
+                    completed[key] = updated
+                    consumed.add(updated.evidence_ids[0])
+                else:
+                    future.append(updated)
+
+        # The newest candidate for the same bindings and next step has the longest remaining window.
+        pending = {}
+        for attempt in future:
+            if attempt.evidence_ids[0] in consumed:
+                continue
+            key = (len(attempt.evidence_ids), tuple(sorted(
+                (alias, target.track_id) for alias, target in attempt.subjects.items()
+            )))
+            if key not in pending or attempt.first_ms >= pending[key].first_ms:
+                pending[key] = attempt
+        self.attempts[rule.id] = (cycle_id, list(pending.values()))
+
+        events = []
+        for match in completed.values():
+            events.append(CompositeEvent(
+                op="sequence", run_id=frame.run_id, rule_id=rule.id,
+                occurrence_id=f"{frame.run_id}:sequence:{self.next_id}",
+                cycle_id=cycle_id, subjects=match.subjects, start_ms=match.first_ms,
+                confirmed_ms=frame.timestamp_ms, confirmed_frame_id=frame.frame_id,
+                evidence_ids=list(match.evidence_ids),
+            ))
+            self.next_id += 1
         return events

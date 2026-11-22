@@ -1,8 +1,9 @@
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+from .composite_rules import CompositeRules, default_composite_rules, resolve_rules
 from .event_rules import ActiveClose, CycleRules, PrimitiveRules, default_primitive_rules
 
 
@@ -23,6 +24,14 @@ class RunRequest(BaseModel):
     cycle_exit_x: float | None = Field(default=None, ge=0, lt=0.30)
     cycle_rules: CycleRules = Field(default_factory=CycleRules)
     primitive_rules: PrimitiveRules | None = Field(default_factory=default_primitive_rules)
+    composite_rules: CompositeRules = Field(default_factory=default_composite_rules)
+
+    @model_validator(mode="after")
+    def validate_composite_rules(self) -> "RunRequest":
+        if "primitive_rules" in self.model_fields_set and "composite_rules" not in self.model_fields_set:
+            self.composite_rules = self.composite_rules.model_copy(update={"events": []})
+        resolve_rules(self.composite_rules, self.primitive_rules, self.cycle_exit_x or 0, self.cycle_rules)
+        return self
 
 
 RunState = Literal["starting", "running", "stopping", "stopped", "completed", "failed"]

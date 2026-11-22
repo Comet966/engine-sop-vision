@@ -64,21 +64,22 @@ curl -X POST http://127.0.0.1:8000/api/runs \
 - **开始** · 连续 1.2 秒未检出 A、B。随后从首个工件入镜起，在 3 秒内确认第一次 `In(A)`。A 的有效可见时间满 200 毫秒时确认开始，B 可先于 A 入镜。
 - **结束** · 同一条 B 轨迹先发出向左的 `Move`，再在 2.5 秒内到达左侧出口并消失。确认 `Out(B)` 和 A、B 连续未检出 1.2 秒后结束。等待清空期间 B 重新出现会取消当前结束候选。
 
-创建任务时可设置清空时间及关联窗口。以下是 `POST /api/runs` 的请求示例。
+周期默认读取 [composite_rules.json](composite_rules.json) 的 `cycle`。以下是文件中的周期写法。
 
 ```json
 {
-  "source": {"type": "video", "path": "瓦片安装2.mp4"},
-  "cycle_exit_x": 0.16,
-  "cycle_rules": {
-    "empty_before_ms": 1200,
-    "empty_after_ms": 1200,
-    "a_wait_ms": 3000,
-    "move_to_out_ms": 2500,
-    "min_confidence": 0.25
+  "clear": {"class_ids": [1, 2], "min_confidence": 0.25},
+  "start": {"after_clear_ms": 1200, "event": "cycle.a_in", "within_ms": 3000},
+  "end": {
+    "move": "cycle.b_moves_left",
+    "out": "cycle.b_out_left",
+    "within_ms": 2500,
+    "clear_ms": 1200
   }
 }
 ```
+
+`clear` 定义参与清空判断的类别和置信度。`start.event` 引用 `In`，等待时间从清空后第一次检出工件算起。`end.move` 和 `end.out` 分别引用 `Move`、`Out`，程序要求同一条轨迹，时间从 `Move` 确认算到 `Out` 首次未检出。确认 `Out` 的延迟与清空计时可以重叠。已有请求中的 `cycle_rules` 仍可按字段覆盖周期参数。
 
 `cycle_exit_x` 以画面宽度为单位。《瓦片安装2.mp4》默认 `0.16`，左侧软管遮挡处为有效出口。《瓦片安装3.mp4》和其他源默认 `0.03`。周期依赖的三条基础规则沿用同一个跟踪器，默认发出 `cycle.a_in`、`cycle.b_moves_left`、`cycle.b_out_left`。
 
@@ -90,7 +91,7 @@ curl -X POST http://127.0.0.1:8000/api/runs \
 
 ## Move、Close、In、Out
 
-创建任务时可以传入 `primitive_rules`，其结构见 [默认规则](primitive_rules.json)。省略时加载默认的 18 条规则，覆盖四类目标各自的 `Move`、`In`、`Out`，以及六种两两 `Close`。周期所需的三条基础规则由服务生成。传 `null` 可关闭基础元事件的推送，周期仍使用内部证据。规则的目标用别名引用 `targets`，事件 `id` 在配置内唯一。实际检测同时受规则的 `min_confidence` 和任务的 `confidence` 限制。
+创建任务时可以传入 `primitive_rules`，其结构见 [默认规则](primitive_rules.json)。默认规则覆盖四类目标各自的 `Move`、`In`、`Out`，以及两两 `Close` 和握持所需的重叠检测。周期所需的三条基础规则由服务生成。传 `null` 可关闭基础元事件的推送，周期仍使用内部证据。规则的目标用别名引用 `targets`，事件 `id` 在配置内唯一。实际检测同时受规则的 `min_confidence` 和任务的 `confidence` 限制。
 
 | 元事件 | 判定和可调参数 |
 | --- | --- |
@@ -142,34 +143,57 @@ curl -X POST http://127.0.0.1:8000/api/runs \
 - `Move`、`In`、`Out` 的 `phase` 为 `detected`。`Close` 发送 `started` 和 `ended`，共享 `occurrence_id`。`ended` 附带 `reason`，结束时间为最后一帧双方同时可见且满足距离条件的时刻。`unobserved` 表示证据中断。
 - 重连时会重发该任务最近 4096 条元事件消息，可用 `run_id` 和 `sequence` 去重。
 
-### 并行组合
+## 组合规则 JSON
 
-在 `primitive_rules.parallel` 加入并行规则。`all` 引用需要同时成立的 `Close` 规则，`same_tracks` 要求分支中相同的别名共享轨迹 ID。`within_cycle` 默认为 `true`，只在已确认开始的周期内执行。下面的两条规则分别表示手套靠近吸管时，同一根吸管同时靠近 A 或 B。
+省略任务请求中的 `composite_rules` 时，服务读取 [composite_rules.json](composite_rules.json)。文件根字段为 `schema_version`、`cycle` 和 `events`。在其中的 `events` 增加组合规则，或把完整文件内容作为 `POST /api/runs` 的 `composite_rules`。基础元事件 ID 来自 [primitive_rules.json](primitive_rules.json) 及周期内置元事件。服务在创建任务前校验引用、重复 ID 和轨迹绑定。
+
+| 字段 | 写法 |
+| --- | --- |
+| `id` | 组合事件唯一 ID，供订阅及后续规则引用。 |
+| `op: "event"` | 用 `event` 引用单个基础事件或已定义的组合事件，为它定义一个可复用的名称。以 `Close.started` 为接近确认。 |
+| `op: "sequence"` | 用 `steps` 写顺序，用 `within_ms` 限制第一步到最后一步的确认时间。相邻步骤须在不同帧按顺序确认。可引用基础事件或数组中已定义的组合事件。 |
+| `op: "parallel"` | 用 `all` 引用同时成立的 `Close`，用 `min_overlap_ms` 设连续重叠时长。 |
+| `same_tracks` | 填写跨步骤或分支共享的目标别名，要求相同的轨迹 ID。若各事件的别名不同，在对应引用里用 `bind` 映射为同一个别名。 |
+| `within_cycle` | 默认为 `true`，仅在同一已开始的周期内匹配。 |
+
+默认配置独立上报三种动作。只传自定义 `primitive_rules` 时，周期仍读取默认配置。需要启用命名动作时，可同时提交引用自定义基础事件的 `composite_rules`。
+
+| 事件 ID | 确认条件 |
+| --- | --- |
+| `hand_holds_tube` | 手套框与吸管框的交集面积达到较小框面积的 30%，同一对轨迹累计获得 300 毫秒有效证据。用二维重叠推断握持。 |
+| `tube_near_a` | 吸管与 A 位满足已调优的框间距和 A 位尺寸规则，累计 300 毫秒有效证据。 |
+| `tube_near_b` | 吸管与 B 位满足已调优的框间距和 B 位尺寸规则，累计 300 毫秒有效证据。 |
+
+握持基础规则的 `min_overlap_ratio` 可按机位调整。三个动作均在对应条件开始成立时确认，后续规则可引用各自的 ID。
+
+`held_tube_near_a` 和 `held_tube_near_b` 要求握持与对应工件接近的证据同时成立，且使用同一条吸管轨迹。握持仍采用原有重叠阈值。组合专用的接近规则将有效观察时间设为 150 毫秒，A 的吸管框宽下限为 0.10，B 的吸管框高下限为 0.28，框高比下限均为 1.5。两项条件连续重叠 60 毫秒后触发。阈值是根据两段录像的试验值。
+
+下面是并行与顺序的语法示例。三个占位 ID 应替换为实际定义的规则 ID。
 
 ```json
 {
-  "parallel": [
+  "events": [
     {
-      "id": "tube_held_near_a",
+      "id": "parallel_example",
       "op": "parallel",
-      "all": [{"event": "glove_close_tube"}, {"event": "tube_close_seat_a"}],
-      "same_tracks": ["tube"],
+      "all": [{"event": "close_first"}, {"event": "close_second"}],
+      "same_tracks": ["target"],
       "min_overlap_ms": 120
     },
     {
-      "id": "tube_held_near_b",
-      "op": "parallel",
-      "all": [{"event": "glove_close_tube"}, {"event": "tube_close_seat_b"}],
-      "same_tracks": ["tube"],
-      "min_overlap_ms": 120
+      "id": "sequence_example",
+      "op": "sequence",
+      "steps": [{"event": "parallel_example"}, {"event": "next_event"}],
+      "same_tracks": ["target"],
+      "within_ms": 2000
     }
   ]
 }
 ```
 
-同一事件要求三个条件时，可把三个分支放进一个 `all`。分支原来使用不同别名时，可在分支中设置 `"bind": {"tube_for_a": "tube"}` 统一引用同一根吸管。组合按每帧的 `active_close` 取连续证据交集。最晚的连续证据起点到当前帧满 `min_overlap_ms` 后，同一组轨迹触发一次。任一目标掉框会中断连续证据，恢复后重新计时。`Close` 表示框间接近，吸附结果仍需工艺证据。
+以上各引用假定均含有 `target` 别名。顺序匹配使用基础事件的确认消息，以 `Close.started` 作为接近步骤的确认。并行取每帧 `active_close` 的连续交集，任一分支失去连续证据时重新计时。已有 `primitive_rules.parallel` 配置仍可读取，新规则统一写入 `composite_rules.events`。
 
-组合消息类型是 `sop.composite_event`。消息包含 `rule_id`、`cycle_id`、`subjects`、重叠起点 `start_ms`、确认位置和各分支的 `evidence_ids`。重连时可按 `occurrence_id` 去重。
+组合消息类型是 `sop.composite_event`。消息包含 `op`、`rule_id`、`cycle_id`、`subjects`、`start_ms`、确认位置和各步骤的 `evidence_ids`。`start_ms` 是重叠起点或第一步的确认时间。重连时可按 `occurrence_id` 去重。
 
 ```bash
 python -m unittest sop_backend.test_primitive_events sop_backend.test_composition

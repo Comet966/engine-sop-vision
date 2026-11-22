@@ -30,7 +30,7 @@ class PrimitiveEventTests(TestCase):
             if index < 20:
                 x = max(7, 124 - max(0, index - 10) * 13)
                 sizes = [(36, 36), (36, 90), (36, 90), (130, 216)]
-                boxes = [(category, x, 200 + 10 * category, *size) for category, size in enumerate(sizes)]
+                boxes = [(category, x, (200, 210, 220, 215)[category], *size) for category, size in enumerate(sizes)]
             events.extend(engine.update(frame(index, *boxes)))
 
         self.assertEqual(

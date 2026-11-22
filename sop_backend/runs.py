@@ -7,9 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from .composition import ParallelEventDetector, WorkpieceCycleComposer
+from .composition import CompositeEventDetector, WorkpieceCycleComposer
+from .composite_rules import resolve_rules
 from .detection import DetectionPacket, Detector, FrameReader, SourceError
-from .event_rules import ParallelEvent, PrimitiveEvent
+from .event_rules import CompositeEvent, PrimitiveEvent
 from .models import RunRequest, RunState, RunStatus, TERMINAL_STATES, WorkpieceCycleEvent
 from .primitive_events import PrimitiveEventDetector
 
@@ -28,9 +29,10 @@ class DetectionRun:
         self.finished_at: datetime | None = None
         self.error: str | None = None
         self.latest: DetectionPacket | None = None
-        self.cycle = WorkpieceCycleComposer(request.cycle_rules, cycle_exit_x, request.primitive_rules)
-        self.parallel = ParallelEventDetector(self.cycle.primitives.parallel)
-        self.composed_events: list[WorkpieceCycleEvent | ParallelEvent] = []
+        resolved = resolve_rules(request.composite_rules, request.primitive_rules, cycle_exit_x, request.cycle_rules)
+        self.cycle = WorkpieceCycleComposer(request.cycle_rules, cycle_exit_x, request.primitive_rules, resolved=resolved)
+        self.composites = CompositeEventDetector(resolved.events)
+        self.composed_events: list[WorkpieceCycleEvent | CompositeEvent] = []
         self.primitives = PrimitiveEventDetector(self.cycle.primitives)
         self.primitive_events: deque[PrimitiveEvent] = deque(maxlen=PRIMITIVE_REPLAY_LIMIT)
         self.stop = asyncio.Event()
@@ -81,7 +83,7 @@ class DetectionRun:
         event = self.cycle.update(packet.result, primitives)
         if event is not None:
             self.composed_events.append(event)
-        self.composed_events.extend(self.parallel.update(packet.result, self.cycle.active))
+        self.composed_events.extend(self.composites.update(packet.result, self.cycle.active, primitives))
         self._notify()
 
     def primitive_events_after(self, sequence: int) -> list[PrimitiveEvent]:

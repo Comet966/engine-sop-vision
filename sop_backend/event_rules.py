@@ -68,6 +68,7 @@ class CloseRule(EventRule):
     hold_ms: int = Field(default=300, ge=0, le=30000)
     bbox_height_ratio: SizeRange | None = None
     bbox_sizes: dict[str, BoxSize] = Field(default_factory=dict)
+    min_overlap_ratio: float | None = Field(default=None, gt=0, le=1)
 
     @model_validator(mode="after")
     def validate_pair(self) -> "CloseRule":
@@ -101,15 +102,38 @@ class OutRule(SingleTargetRule):
 PrimitiveRule = Annotated[MoveRule | CloseRule | InRule | OutRule, Field(discriminator="type")]
 
 
-class ParallelTerm(RuleModel):
+class EventReference(RuleModel):
     event: str
     bind: dict[str, str] = Field(default_factory=dict)
+
+
+def resolve_subjects(
+    terms: list[EventReference], same_tracks: list[str], available: dict[str, dict[str, int]],
+) -> dict[str, int]:
+    result = {}
+    repeated = set()
+    for term in terms:
+        if term.event not in available:
+            raise ValueError(f"Unknown event or forward reference: {term.event!r}")
+        source = available[term.event]
+        renamed = {term.bind.get(alias, alias): category for alias, category in source.items()}
+        if term.bind.keys() - source.keys() or len(renamed) != len(source) or not all(renamed):
+            raise ValueError(f"Invalid aliases for {term.event!r}")
+        for alias, category in renamed.items():
+            if alias in result:
+                repeated.add(alias)
+                if result[alias] != category or alias not in same_tracks:
+                    raise ValueError(f"Shared alias {alias!r} requires same_tracks and the same YOLO class")
+            result[alias] = category
+    if len(set(same_tracks)) != len(same_tracks) or set(same_tracks) - repeated:
+        raise ValueError("same_tracks must list distinct aliases shared by multiple branches or steps")
+    return result
 
 
 class ParallelRule(RuleModel):
     id: str = Field(min_length=1, max_length=128)
     op: Literal["parallel"] = "parallel"
-    all: list[ParallelTerm] = Field(min_length=2, max_length=8)
+    all: list[EventReference] = Field(min_length=2, max_length=8)
     same_tracks: list[str] = Field(default_factory=list)
     min_overlap_ms: int = Field(default=120, ge=0, le=30000)
     within_cycle: bool = True
@@ -148,27 +172,15 @@ class PrimitiveRules(RuleModel):
             self.validate_parallel(rule, close)
         return self
 
-    def validate_parallel(self, rule: ParallelRule, close: dict[str, CloseRule]) -> None:
+    def validate_parallel(self, rule: ParallelRule, close: dict[str, CloseRule]) -> dict[str, int]:
         if len({term.event for term in rule.all}) != len(rule.all):
             raise ValueError(f"Duplicate branch in {rule.id!r}")
-        aliases: dict[str, list[int]] = {}
+        available = {}
         for term in rule.all:
             if term.event not in close:
                 raise ValueError(f"Parallel branch {term.event!r} must name a Close rule")
-            targets = close[term.event].targets
-            names = [term.bind.get(target, target) for target in targets]
-            if term.bind.keys() - set(targets) or len(set(names)) != len(names) or not all(names):
-                raise ValueError(f"Invalid aliases for branch {term.event!r}")
-            for name, target in zip(names, targets):
-                aliases.setdefault(name, []).append(self.targets[target].class_id)
-        if len(set(rule.same_tracks)) != len(rule.same_tracks):
-            raise ValueError(f"Duplicate same_tracks alias in {rule.id!r}")
-        for alias, classes in aliases.items():
-            if len(classes) > 1 and (alias not in rule.same_tracks or len(set(classes)) > 1):
-                raise ValueError(f"Shared alias {alias!r} requires same_tracks and the same YOLO class")
-        for alias in rule.same_tracks:
-            if len(aliases.get(alias, ())) < 2:
-                raise ValueError(f"same_tracks alias {alias!r} must occur in multiple branches")
+            available[term.event] = {alias: self.targets[alias].class_id for alias in close[term.event].targets}
+        return resolve_subjects(rule.all, rule.same_tracks, available)
 
 
 def default_primitive_rules() -> PrimitiveRules:
@@ -207,9 +219,9 @@ class ActiveClose(BaseModel):
     evidence_start_ms: int
 
 
-class ParallelEvent(BaseModel):
+class CompositeEvent(BaseModel):
     type: Literal["sop.composite_event"] = "sop.composite_event"
-    op: Literal["parallel"] = "parallel"
+    op: Literal["event", "parallel", "sequence"]
     run_id: str
     rule_id: str
     occurrence_id: str
@@ -219,3 +231,7 @@ class ParallelEvent(BaseModel):
     confirmed_ms: int
     confirmed_frame_id: int
     evidence_ids: list[str]
+
+
+class ParallelEvent(CompositeEvent):
+    op: Literal["parallel"] = "parallel"

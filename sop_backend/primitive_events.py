@@ -12,7 +12,7 @@ from .event_rules import (
     PrimitiveRules, TrackedTarget,
 )
 from .models import Detection, DetectionFrame
-from .tracking import BoxTracker, center
+from .tracking import BoxTracker, area, center
 
 
 CloseReason = Literal["separated", "unobserved", "stream_gap", "run_finished"]
@@ -64,6 +64,12 @@ class Proximity:
 
 def bbox_gap(a: Box, b: Box) -> float:
     return hypot(max(0, a[0] - b[2], b[0] - a[2]), max(0, a[1] - b[3], b[1] - a[3]))
+
+
+def bbox_overlap_ratio(a: Box, b: Box) -> float:
+    width = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    height = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    return width * height / min(area(a), area(b))
 
 
 def matches_box_size(size: BoxSize, box: Box, width: int, height: int) -> bool:
@@ -315,7 +321,8 @@ class PrimitiveEventDetector:
         left, right = (self.config.targets[alias] for alias in rule.targets)
         symmetric = left == right and rule.bbox_height_ratio is None and not rule.bbox_sizes
         diagonal = hypot(frame.width, frame.height)
-        distances: dict[tuple[int, int], tuple[float, float | None]] = {}
+        min_overlap = rule.min_overlap_ratio or 0
+        distances: dict[tuple[int, int], tuple[float, float | None, float | None]] = {}
         for a, b in product(first, second):
             if a == b or (symmetric and a > b):
                 continue
@@ -328,14 +335,17 @@ class PrimitiveEventDetector:
                 height_ratio = (box_a[3] - box_a[1]) / height_b
                 if not rule.bbox_height_ratio.contains(height_ratio):
                     continue
-            distances[a, b] = (bbox_gap(box_a, box_b) / diagonal, height_ratio)
+            overlap = bbox_overlap_ratio(box_a, box_b) if min_overlap else None
+            distances[a, b] = (bbox_gap(box_a, box_b) / diagonal, height_ratio, overlap)
         events = []
         for pair, state in list(states.items()):
             match = distances.get(pair)
             reason: CloseReason | None = None
             if gap_exceeded(state.dwell.last, now, rule.max_gap_ms, match is not None):
                 reason = "unobserved"
-            elif match is not None and match[0] > rule.exit_distance_ratio:
+            elif match is not None and (
+                match[0] > rule.exit_distance_ratio or (match[2] is not None and match[2] < min_overlap)
+            ):
                 reason = "separated"
             elif match is None:
                 state.dwell.continuous = False
@@ -344,7 +354,9 @@ class PrimitiveEventDetector:
                     events.append(self._end_close(state, now, reason))
                 del states[pair]
 
-        for pair, (distance, height_ratio) in distances.items():
+        for pair, (distance, height_ratio, overlap) in distances.items():
+            if overlap is not None and overlap < min_overlap:
+                continue
             state = states.get(pair)
             if state is None:
                 if distance > rule.enter_distance_ratio:
@@ -355,6 +367,8 @@ class PrimitiveEventDetector:
                 evidence = {"distance_ratio": distance, "observed_ms": state.dwell.observed_ms}
                 if height_ratio is not None:
                     evidence["bbox_height_ratio"] = height_ratio
+                if overlap is not None:
+                    evidence["bbox_overlap_ratio"] = overlap
                 state.started = self._event(
                     rule, frame, pair, state.dwell.start, now, evidence=evidence,
                 )

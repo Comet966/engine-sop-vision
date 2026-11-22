@@ -2,8 +2,10 @@ from unittest import TestCase
 
 from pydantic import ValidationError
 
-from .composition import ParallelEventDetector, WorkpieceCycleComposer
-from .event_rules import ActiveClose, CycleRules, PrimitiveEvent, PrimitiveRules, TrackedTarget
+from .composition import CompositeEventDetector, ParallelEventDetector, WorkpieceCycleComposer
+from .composite_rules import SequenceRule, default_composite_rules
+from .event_rules import ActiveClose, CycleRules, PrimitiveEvent, PrimitiveRules, TrackedTarget, default_primitive_rules
+from .models import RunRequest, WorkpieceCycleEvent
 from .primitive_events import PrimitiveEventDetector
 from .test_primitive_events import frame
 
@@ -127,3 +129,80 @@ class ParallelTests(TestCase):
                 ],
                 "parallel": [{"id": "invalid", "all": [{"event": "in"}, {"event": "near"}]}],
             })
+
+
+class SequenceTests(TestCase):
+    def test_order_identity_and_timeout(self):
+        rule = SequenceRule.model_validate({
+            "id": "ordered", "op": "sequence", "within_cycle": False, "within_ms": 160,
+            "steps": [{"event": "first"}, {"event": "last", "bind": {"other": "part"}}],
+            "same_tracks": ["part"],
+        })
+        detector = CompositeEventDetector([rule])
+
+        def event(index, name, track=1):
+            alias = "part" if name == "first" else "other"
+            return PrimitiveEvent(
+                event="Move", phase="detected", run_id="test", sequence=index, rule_id=name,
+                occurrence_id=f"{name}:{index}", subjects={alias: TrackedTarget(track_id=track, class_id=2)},
+                start_ms=index * 40, start_frame_id=index, confirmed_ms=index * 40, confirmed_frame_id=index,
+            )
+
+        self.assertEqual(detector.update(frame(0), None, [event(0, "last")]), [])
+        self.assertEqual(detector.update(frame(1), None, [event(1, "first"), event(1, "last")]), [])
+        self.assertEqual(detector.update(frame(2), None, [event(2, "last", track=2)]), [])
+        hit, = detector.update(frame(3), None, [event(3, "last")])
+        self.assertEqual((hit.op, hit.start_ms, hit.confirmed_ms), ("sequence", 40, 120))
+        self.assertEqual(hit.evidence_ids, ["first:1", "last:3"])
+        self.assertEqual(detector.update(frame(4), None, [event(4, "last")]), [])
+        detector.update(frame(5), None, [event(5, "first")])
+        for index in range(6, 10):
+            detector.update(frame(index), None, [])
+        self.assertEqual(detector.update(frame(10), None, [event(10, "last")]), [])
+
+    def test_request_validates_references_and_reads_cycle_parameters(self):
+        config = default_composite_rules().model_dump(mode="json")
+        config["cycle"]["start"]["after_clear_ms"] = 2400
+        config["events"] = [{
+            "id": "seat_a_motion", "op": "sequence", "within_ms": 2000,
+            "steps": [{"event": "seat_a_in"}, {"event": "seat_a_moves"}],
+            "same_tracks": ["seat_a"],
+        }]
+        source = {"type": "camera", "index": 0}
+        request = RunRequest.model_validate({"source": source, "composite_rules": config})
+        self.assertEqual(request.composite_rules.cycle.start.after_clear_ms, 2400)
+        config["events"][0]["steps"][1]["event"] = "missing_rule"
+        with self.assertRaisesRegex(ValidationError, "Unknown event"):
+            RunRequest.model_validate({"source": source, "composite_rules": config})
+
+
+class NamedEventTests(TestCase):
+    def test_tube_positions_are_independent_and_grip_requires_overlap(self):
+        primitives = PrimitiveEventDetector(default_primitive_rules())
+        detector = CompositeEventDetector(default_composite_rules().events)
+        cycle = WorkpieceCycleEvent(
+            phase="started", run_id="test", cycle_id="test:1", start_ms=0, start_frame_id=0,
+            confirmed_ms=0, confirmed_frame_id=0,
+        )
+
+        def observe(index, glove_x):
+            current = frame(
+                index, (3, 200, 200, 130, 216), (1, 250, 220, 36, 90),
+                (2, 290, 220, 36, 90), (0, glove_x, 220),
+            )
+            events = primitives.update(current)
+            return detector.update(current, cycle, events)
+
+        approaches = [event for index in range(10) for event in observe(index, 335)]
+        self.assertEqual([event.rule_id for event in approaches], ["tube_near_a", "tube_near_b"])
+        self.assertTrue(all(event.cycle_id == cycle.cycle_id for event in approaches))
+        grip, = [event for index in range(10, 23) for event in observe(index, 310)
+                 if event.rule_id == "hand_holds_tube"]
+        self.assertEqual((grip.rule_id, grip.confirmed_ms - grip.start_ms), ("hand_holds_tube", 320))
+        self.assertEqual(set(grip.subjects), {"glove", "tube"})
+        self.assertEqual(observe(23, 335), [])
+
+    def test_custom_primitive_only_request_keeps_working(self):
+        source = {"type": "camera", "index": 0}
+        request = RunRequest.model_validate({"source": source, "primitive_rules": None})
+        self.assertEqual(request.composite_rules.events, [])

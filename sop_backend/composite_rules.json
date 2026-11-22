@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "cycle": {
+    "clear": {
+      "class_ids": [
+        1,
+        2
+      ],
+      "min_confidence": 0.25
+    },
+    "start": {
+      "after_clear_ms": 1200,
+      "event": "cycle.a_in",
+      "within_ms": 3000
+    },
+    "end": {
+      "move": "cycle.b_moves_left",
+      "out": "cycle.b_out_left",
+      "within_ms": 2500,
+      "clear_ms": 1200
+    }
+  },
+  "events": [
+    {
+      "id": "hand_holds_tube",
+      "op": "event",
+      "event": "glove_overlaps_tube"
+    },
+    {
+      "id": "tube_near_a",
+      "op": "event",
+      "event": "tube_close_seat_a"
+    },
+    {
+      "id": "tube_near_b",
+      "op": "event",
+      "event": "tube_close_seat_b"
+    },
+    {
+      "id": "held_tube_near_a",
+      "op": "parallel",
+      "all": [
+        {
+          "event": "glove_overlaps_tube"
+        },
+        {
+          "event": "held_tube_close_seat_a"
+        }
+      ],
+      "same_tracks": [
+        "tube"
+      ],
+      "min_overlap_ms": 60
+    },
+    {
+      "id": "held_tube_near_b",
+      "op": "parallel",
+      "all": [
+        {
+          "event": "glove_overlaps_tube"
+        },
+        {
+          "event": "held_tube_close_seat_b"
+        }
+      ],
+      "same_tracks": [
+        "tube"
+      ],
+      "min_overlap_ms": 60
+    }
+  ]
+}
