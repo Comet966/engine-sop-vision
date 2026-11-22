@@ -1,0 +1,8 @@
+path: "/Users/comet/Desktop/SOP/yolo_dataset"
+train: images/train
+val: images/val
+names:
+  0: "手套"
+  1: "瓦片安装位置 A"
+  2: "瓦片安装位置 B"
+  3: "吸管"

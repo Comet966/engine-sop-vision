@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "targets": {
+    "tube_for_a": {
+      "class_id": 3,
+      "bbox_size": {"metric": "width_ratio", "min": 0.112, "max": 0.22}
+    },
+    "tube_for_b": {
+      "class_id": 3,
+      "bbox_size": {"metric": "height_ratio", "min": 0.34, "max": 0.62}
+    },
+    "seat_a": {"class_id": 1},
+    "seat_b": {"class_id": 2}
+  },
+  "events": [
+    {
+      "id": "tube_close_seat_a",
+      "type": "Close",
+      "targets": ["tube_for_a", "seat_a"],
+      "min_confidence": 0.25,
+      "enter_distance_ratio": 0.015,
+      "exit_distance_ratio": 0.025,
+      "hold_ms": 300,
+      "max_gap_ms": 100,
+      "bbox_height_ratio": {"min": 1.7, "max": 3.1}
+    },
+    {
+      "id": "tube_close_seat_b",
+      "type": "Close",
+      "targets": ["tube_for_b", "seat_b"],
+      "min_confidence": 0.25,
+      "enter_distance_ratio": 0.015,
+      "exit_distance_ratio": 0.025,
+      "hold_ms": 300,
+      "max_gap_ms": 100,
+      "bbox_height_ratio": {"min": 1.7, "max": 3.6}
+    }
+  ]
+}

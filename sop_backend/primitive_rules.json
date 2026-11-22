@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "targets": {
+    "glove": {"class_id": 0},
+    "seat_a": {"class_id": 1},
+    "seat_b": {"class_id": 2},
+    "tube": {"class_id": 3}
+  },
+  "events": [
+    {"id": "glove_moves", "type": "Move", "target": "glove"},
+    {"id": "seat_a_moves", "type": "Move", "target": "seat_a"},
+    {"id": "seat_b_moves", "type": "Move", "target": "seat_b"},
+    {"id": "tube_moves", "type": "Move", "target": "tube"},
+    {"id": "glove_in", "type": "In", "target": "glove"},
+    {"id": "seat_a_in", "type": "In", "target": "seat_a"},
+    {"id": "seat_b_in", "type": "In", "target": "seat_b"},
+    {"id": "tube_in", "type": "In", "target": "tube"},
+    {"id": "glove_out", "type": "Out", "target": "glove"},
+    {"id": "seat_a_out", "type": "Out", "target": "seat_a"},
+    {"id": "seat_b_out", "type": "Out", "target": "seat_b"},
+    {"id": "tube_out", "type": "Out", "target": "tube"},
+    {"id": "glove_close_seat_a", "type": "Close", "targets": ["glove", "seat_a"]},
+    {"id": "glove_close_seat_b", "type": "Close", "targets": ["glove", "seat_b"]},
+    {"id": "glove_close_tube", "type": "Close", "targets": ["glove", "tube"]},
+    {"id": "seat_a_close_seat_b", "type": "Close", "targets": ["seat_a", "seat_b"]},
+    {
+      "id": "tube_close_seat_a", "type": "Close", "targets": ["tube", "seat_a"],
+      "bbox_sizes": {"tube": {"metric": "width_ratio", "min": 0.112, "max": 0.22}},
+      "bbox_height_ratio": {"min": 1.7, "max": 3.1}
+    },
+    {
+      "id": "tube_close_seat_b", "type": "Close", "targets": ["tube", "seat_b"],
+      "bbox_sizes": {"tube": {"metric": "height_ratio", "min": 0.34, "max": 0.62}},
+      "bbox_height_ratio": {"min": 1.7, "max": 3.6}
+    }
+  ]
+}
