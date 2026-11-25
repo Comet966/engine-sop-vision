@@ -109,8 +109,10 @@ class DetectionRun:
 
 class DetectionService:
     def __init__(self) -> None:
-        # Keep capture and CUDA/TensorRT operations on the same thread.
+        # Keep CUDA/TensorRT creation, execution and destruction on one thread.
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sop-detector")
+        self.capture_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sop-capture")
+        self.preview_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sop-preview")
         self.detector: Detector | None = None
         self.runs: dict[str, DetectionRun] = {}
         self.active: DetectionRun | None = None
@@ -129,26 +131,39 @@ class DetectionService:
         self.task = asyncio.create_task(self._run(run, source))
         return run
 
-    async def _capture(self, run: DetectionRun, source: Path | int) -> None:
+    async def _capture(self, run: DetectionRun, source: Path | int, *, pace_video: bool = True) -> None:
         loop = asyncio.get_running_loop()
         detector = self.detector
         assert detector is not None
         if run.stop.is_set():
             return
 
-        reader = await loop.run_in_executor(self.executor, FrameReader, source)
+        reader = await loop.run_in_executor(self.capture_executor, FrameReader, source)
+        prepared = None
+        inferred = None
+
+        async def infer_next():
+            nonlocal prepared
+            frame = await prepared
+            if frame is None or run.stop.is_set():
+                return None
+            prepared = loop.run_in_executor(self.capture_executor, detector.prepare_frame, reader)
+            return await loop.run_in_executor(self.executor, detector.infer_frame, frame, run.id, run.request.confidence)
+
         try:
             if run.stop.is_set():
                 return
             run.transition("running")
             started = loop.time()
+            prepared = loop.run_in_executor(self.capture_executor, detector.prepare_frame, reader)
+            inferred = asyncio.create_task(infer_next())
             while not run.stop.is_set():
-                packet = await loop.run_in_executor(
-                    self.executor, detector.read_frame, reader, run.id, run.request.confidence
-                )
-                if packet is None:
+                frame = await inferred
+                if frame is None or run.stop.is_set():
                     break
-                if isinstance(source, Path):
+                inferred = asyncio.create_task(infer_next())
+                packet = await loop.run_in_executor(self.preview_executor, detector.encode_preview, frame)
+                if pace_video and isinstance(source, Path):
                     delay = started + packet.result.timestamp_ms / 1000 - loop.time()
                     if delay > 0:
                         try:
@@ -158,7 +173,12 @@ class DetectionService:
                 if not run.stop.is_set():
                     run.publish(packet)
         finally:
-            await loop.run_in_executor(self.executor, reader.close)
+            # Drain any in-flight work before releasing the capture or reusing the detector.
+            if inferred is not None:
+                await asyncio.gather(inferred, return_exceptions=True)
+            if prepared is not None:
+                await asyncio.gather(prepared, return_exceptions=True)
+            await loop.run_in_executor(self.capture_executor, reader.close)
 
     async def _run(self, run: DetectionRun, source: Path | int) -> None:
         try:
@@ -183,3 +203,5 @@ class DetectionService:
                 await asyncio.get_running_loop().run_in_executor(self.executor, self.detector.close)
         finally:
             self.executor.shutdown(wait=True)
+            self.capture_executor.shutdown(wait=True)
+            self.preview_executor.shutdown(wait=True)

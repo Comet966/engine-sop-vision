@@ -26,6 +26,21 @@ class DetectionPacket:
     jpeg: bytes
 
 
+@dataclass(frozen=True)
+class PreparedFrame:
+    frame_id: int
+    timestamp_ms: int
+    image: np.ndarray
+    tensor: np.ndarray
+    coords: tuple[float, int, int]
+
+
+@dataclass(frozen=True)
+class InferredFrame:
+    result: DetectionFrame
+    image: np.ndarray
+
+
 class FrameReader:
     def __init__(self, source: Path | int) -> None:
         self.camera = isinstance(source, int)
@@ -76,19 +91,24 @@ class Detector:
             self.close()
             raise
 
-    def read_frame(self, reader: FrameReader, run_id: str, confidence: float) -> DetectionPacket | None:
+    @staticmethod
+    def prepare_frame(reader: FrameReader) -> PreparedFrame | None:
         frame = reader.read()
         if frame is None:
             return None
 
         frame_id, timestamp_ms, image = frame
         tensor, gain, left, top = prepare(image)
-        boxes = decode(self.backend(tensor), (gain, left, top), image.shape, confidence)
+        return PreparedFrame(frame_id, timestamp_ms, image, tensor, (gain, left, top))
+
+    def infer_frame(self, frame: PreparedFrame, run_id: str, confidence: float) -> InferredFrame:
+        image = frame.image
+        boxes = decode(self.backend(frame.tensor), frame.coords, image.shape, confidence)
         height, width = image.shape[:2]
         result = DetectionFrame(
             run_id=run_id,
-            frame_id=frame_id,
-            timestamp_ms=timestamp_ms,
+            frame_id=frame.frame_id,
+            timestamp_ms=frame.timestamp_ms,
             width=width,
             height=height,
             detections=[
@@ -96,11 +116,21 @@ class Detector:
                 for category, score, box in boxes
             ],
         )
+        return InferredFrame(result, image)
+
+    @staticmethod
+    def encode_preview(frame: InferredFrame) -> DetectionPacket:
+        image = frame.image
+        boxes = [(d.class_id, d.confidence, d.bbox_xyxy) for d in frame.result.detections]
         draw_detections(image, boxes)
         encoded, jpeg = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if not encoded:
             raise RuntimeError("Could not encode detection preview")
-        return DetectionPacket(result, jpeg.tobytes())
+        return DetectionPacket(frame.result, jpeg.tobytes())
+
+    def read_frame(self, reader: FrameReader, run_id: str, confidence: float) -> DetectionPacket | None:
+        prepared = self.prepare_frame(reader)
+        return None if prepared is None else self.encode_preview(self.infer_frame(prepared, run_id, confidence))
 
     def close(self) -> None:
         if isinstance(self.backend, TensorRT):
