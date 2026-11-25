@@ -37,14 +37,18 @@
       "event": "tube_close_seat_b"
     },
     {
-      "id": "held_tube_near_a",
+      "id": "held_tube_near_a_left",
       "op": "parallel",
       "all": [
         {
-          "event": "held_tube_close_seat_a"
+          "event": "held_tube_close_seat_a_left"
         }
       ],
-      "when": [{"event": "glove_overlaps_tube_for_workpiece_a"}],
+      "when": [
+        {
+          "event": "glove_overlaps_tube_for_workpiece_a"
+        }
+      ],
       "same_tracks": [
         "tube",
         "glove"
@@ -52,14 +56,56 @@
       "min_overlap_ms": 60
     },
     {
-      "id": "held_tube_near_b",
+      "id": "held_tube_near_a_right",
       "op": "parallel",
       "all": [
         {
-          "event": "held_tube_close_seat_b"
+          "event": "held_tube_close_seat_a_right"
         }
       ],
-      "when": [{"event": "glove_overlaps_tube"}],
+      "when": [
+        {
+          "event": "glove_overlaps_tube_for_workpiece_a"
+        }
+      ],
+      "same_tracks": [
+        "tube",
+        "glove"
+      ],
+      "min_overlap_ms": 60
+    },
+    {
+      "id": "held_tube_near_b_top",
+      "op": "parallel",
+      "all": [
+        {
+          "event": "held_tube_close_seat_b_top"
+        }
+      ],
+      "when": [
+        {
+          "event": "glove_overlaps_tube"
+        }
+      ],
+      "same_tracks": [
+        "tube",
+        "glove"
+      ],
+      "min_overlap_ms": 60
+    },
+    {
+      "id": "held_tube_near_b_bottom",
+      "op": "parallel",
+      "all": [
+        {
+          "event": "held_tube_close_seat_b_bottom"
+        }
+      ],
+      "when": [
+        {
+          "event": "glove_overlaps_tube"
+        }
+      ],
       "same_tracks": [
         "tube",
         "glove"

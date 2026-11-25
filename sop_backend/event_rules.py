@@ -59,10 +59,34 @@ class MoveRule(SingleTargetRule):
     direction: Direction | None = None
 
 
+Edge = Literal["left", "right", "top", "bottom"]
+
+
+class RelativePosition(RuleModel):
+    reference: str = Field(min_length=1)
+    anchor: Literal["center", "left", "right", "top", "bottom"] = "center"
+    axis: Literal["x", "y"]
+    min: float | None = Field(default=None, allow_inf_nan=False)
+    max: float | None = Field(default=None, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> "RelativePosition":
+        if self.min is None and self.max is None:
+            raise ValueError("Set at least one relative position bound")
+        if self.min is not None and self.max is not None and self.min > self.max:
+            raise ValueError("Minimum relative position must not exceed maximum")
+        return self
+
+    def contains(self, value: float) -> bool:
+        return (self.min is None or value >= self.min) and (self.max is None or value <= self.max)
+
+
 class CloseRule(EventRule):
     type: Literal["Close"]
     targets: tuple[str, str]
     distance_metric: Literal["bbox_gap", "center_distance", "bottom_edge_gap"] = "bbox_gap"
+    edge: Edge | None = None
+    target_edge: Edge | None = None
     enter_distance_ratio: float = Field(default=0.015, ge=0, le=1)
     exit_distance_ratio: float = Field(default=0.025, gt=0, le=1)
     hold_ms: int = Field(default=300, ge=0, le=30000)
@@ -70,6 +94,7 @@ class CloseRule(EventRule):
     bbox_sizes: dict[str, BoxSize] = Field(default_factory=dict)
     min_overlap_ratio: float | None = Field(default=None, gt=0, le=1)
     union_with: str | None = Field(default=None, min_length=1)
+    relative_position: RelativePosition | None = None
 
     @property
     def subject_aliases(self) -> tuple[str, ...]:
@@ -79,8 +104,16 @@ class CloseRule(EventRule):
     def validate_pair(self) -> "CloseRule":
         if self.targets[0] == self.targets[1]:
             raise ValueError("Close requires two distinct target aliases")
+        if self.edge is not None and self.distance_metric != "bbox_gap":
+            raise ValueError("Close edge requires distance_metric='bbox_gap'")
+        if self.target_edge is not None and self.distance_metric == "center_distance":
+            raise ValueError("Close target_edge requires a gap distance_metric")
         if self.union_with in self.targets:
             raise ValueError("Close union_with must be distinct from the two distance targets")
+        if self.relative_position:
+            reference = self.relative_position.reference
+            if reference != self.targets[0] and (reference != "union" or self.union_with is None):
+                raise ValueError("Close relative_position.reference must be the first target or 'union' with union_with")
         if self.exit_distance_ratio <= self.enter_distance_ratio:
             raise ValueError("Close exit_distance_ratio must exceed enter_distance_ratio")
         if self.bbox_sizes.keys() - set(self.subject_aliases):
@@ -91,9 +124,6 @@ class CloseRule(EventRule):
 class InRule(SingleTargetRule):
     type: Literal["In"]
     confirm_ms: int = Field(default=200, ge=0, le=30000)
-
-
-Edge = Literal["left", "right", "top", "bottom"]
 
 
 class OutRule(SingleTargetRule):

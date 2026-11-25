@@ -169,9 +169,9 @@
       }
     },
     {
-      "id": "held_tube_close_seat_a",
+      "id": "held_tube_close_seat_a_left",
       "type": "Close",
-      "distance_metric": "bottom_edge_gap",
+      "distance_metric": "bbox_gap",
       "union_with": "glove",
       "targets": [
         "tube",
@@ -186,14 +186,48 @@
       },
       "bbox_height_ratio": {
         "min": 1.5,
-        "max": 3.1
+        "max": 3.25
       },
-      "hold_ms": 150
+      "hold_ms": 150,
+      "edge": "bottom",
+      "relative_position": {
+        "reference": "tube",
+        "axis": "x",
+        "max": 0.3
+      }
     },
     {
-      "id": "held_tube_close_seat_b",
+      "id": "held_tube_close_seat_a_right",
       "type": "Close",
-      "distance_metric": "bottom_edge_gap",
+      "distance_metric": "bbox_gap",
+      "union_with": "glove",
+      "targets": [
+        "tube",
+        "seat_a"
+      ],
+      "bbox_sizes": {
+        "tube": {
+          "metric": "width_ratio",
+          "min": 0.1,
+          "max": 0.22
+        }
+      },
+      "bbox_height_ratio": {
+        "min": 1.5,
+        "max": 3.25
+      },
+      "hold_ms": 150,
+      "edge": "bottom",
+      "relative_position": {
+        "reference": "tube",
+        "axis": "x",
+        "min": 0.4
+      }
+    },
+    {
+      "id": "held_tube_close_seat_b_top",
+      "type": "Close",
+      "distance_metric": "bbox_gap",
       "union_with": "glove",
       "targets": [
         "tube",
@@ -210,7 +244,47 @@
         "min": 1.5,
         "max": 3.6
       },
-      "hold_ms": 125
+      "hold_ms": 60,
+      "edge": "bottom",
+      "enter_distance_ratio": 0.025,
+      "exit_distance_ratio": 0.035,
+      "relative_position": {
+        "reference": "union",
+        "anchor": "bottom",
+        "axis": "y",
+        "max": 0.08
+      }
+    },
+    {
+      "id": "held_tube_close_seat_b_bottom",
+      "type": "Close",
+      "distance_metric": "bbox_gap",
+      "union_with": "glove",
+      "targets": [
+        "tube",
+        "seat_b"
+      ],
+      "bbox_sizes": {
+        "tube": {
+          "metric": "height_ratio",
+          "min": 0.28,
+          "max": 0.62
+        }
+      },
+      "bbox_height_ratio": {
+        "min": 1.5,
+        "max": 3.6
+      },
+      "hold_ms": 100,
+      "edge": "bottom",
+      "enter_distance_ratio": 0.025,
+      "exit_distance_ratio": 0.035,
+      "relative_position": {
+        "reference": "union",
+        "anchor": "bottom",
+        "axis": "y",
+        "min": 0.11
+      }
     }
   ]
 }

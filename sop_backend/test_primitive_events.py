@@ -4,7 +4,7 @@ from pydantic import ValidationError
 
 from .event_rules import BoxSize, PrimitiveRules, default_primitive_rules
 from .models import Detection, DetectionFrame
-from .primitive_events import PrimitiveEventDetector, matches_box_size
+from .primitive_events import PrimitiveEventDetector, close_distance, matches_box_size
 
 
 def frame(index, *boxes):
@@ -23,15 +23,17 @@ def frame(index, *boxes):
 class PrimitiveEventTests(TestCase):
     def test_default_rules_cover_four_classes_and_all_six_pairs(self):
         config = default_primitive_rules()
-        engine = PrimitiveEventDetector(config)
         events = []
-        for index in range(35):
-            boxes = []
-            if index < 20:
-                x = max(7, 124 - max(0, index - 10) * 13)
-                sizes = [(36, 150), (36, 90), (36, 90), (130, 216)]
-                boxes = [(category, x, (200, 350, 355, 215)[category], *size) for category, size in enumerate(sizes)]
-            events.extend(engine.update(frame(index, *boxes)))
+        for a_offset, b_y in ((0, 355), (65, 430)):
+            engine = PrimitiveEventDetector(config)
+            for index in range(35):
+                boxes = []
+                if index < 20:
+                    x = max(7, 124 - max(0, index - 10) * 13)
+                    sizes = [(36, 150), (36, 90), (36, 90), (130, 216)]
+                    boxes = [(category, x + (a_offset if category == 1 else 0), (200, 350, b_y, 215)[category], *size)
+                             for category, size in enumerate(sizes)]
+                events.extend(engine.update(frame(index, *boxes)))
 
         self.assertEqual(
             {e.rule_id for e in events if e.phase != "ended"}, {rule.id for rule in config.events},
@@ -81,6 +83,118 @@ class PrimitiveEventTests(TestCase):
         current = frame(2, tube, seat)
         detector.update(current)
         self.assertEqual(current.active_close, [])
+
+    def test_close_selects_any_edge_of_first_box(self):
+        edges = ("top", "bottom", "left", "right")
+        rules = PrimitiveRules.model_validate({
+            "targets": {"tube": {"class_id": 3}, "seat": {"class_id": 2}},
+            "events": [
+                {"id": edge, "type": "Close", "targets": ["tube", "seat"], "edge": edge, "hold_ms": 0}
+                for edge in edges
+            ],
+        })
+        tube = (3, 100, 100, 100, 100)
+        fixtures = {
+            "top": (2, 130, 75, 40, 20),
+            "bottom": (2, 130, 205, 40, 20),
+            "left": (2, 75, 130, 20, 40),
+            "right": (2, 205, 130, 20, 40),
+        }
+        for edge, seat in fixtures.items():
+            with self.subTest(edge=edge):
+                event, = PrimitiveEventDetector(rules).update(frame(0, tube, seat))
+                self.assertEqual(event.rule_id, edge)
+                self.assertAlmostEqual(event.evidence["distance_ratio"], 5 / (1000**2 + 600**2)**0.5)
+
+    def test_close_measures_both_selected_edges_of_union_and_target(self):
+        rules = PrimitiveRules.model_validate({
+            "targets": {"tube": {"class_id": 3}, "seat": {"class_id": 2}, "glove": {"class_id": 0}},
+            "events": [
+                {"id": edge, "type": "Close", "targets": ["tube", "seat"], "edge": "bottom",
+                 "target_edge": edge, "union_with": "glove", "hold_ms": 0}
+                for edge in ("left", "right", "top", "bottom")
+            ],
+        })
+        tube = (3, 100, 100, 20, 80)
+        glove = (0, 100, 160, 40, 40)
+        seat = (2, 145, 170, 50, 80)
+        event, = PrimitiveEventDetector(rules).update(frame(0, tube, glove, seat))
+        self.assertEqual(event.rule_id, "left")
+        self.assertAlmostEqual(event.evidence["distance_ratio"], 5 / (1000**2 + 600**2)**0.5)
+        union_box, seat_box = (100, 100, 140, 200), (145, 170, 195, 250)
+        for edge, expected in (("left", 5), ("right", 55), ("top", (5**2 + 30**2)**0.5),
+                               ("bottom", (5**2 + 50**2)**0.5)):
+            with self.subTest(edge=edge):
+                self.assertAlmostEqual(close_distance(union_box, seat_box, "bbox_gap", "bottom", edge), expected)
+
+    def test_close_relative_position_uses_source_or_union_and_resets_on_region_exit(self):
+        rules = PrimitiveRules.model_validate({
+            "targets": {"tube": {"class_id": 3}, "seat": {"class_id": 2}, "glove": {"class_id": 0}},
+            "events": [
+                {"id": name, "type": "Close", "targets": ["tube", "seat"], "edge": "bottom",
+                 "union_with": "glove", "hold_ms": 0, "relative_position": position}
+                for name, position in (
+                    ("left", {"reference": "tube", "axis": "x", "max": 0.4}),
+                    ("right", {"reference": "tube", "axis": "x", "min": 0.5}),
+                    ("lower", {"reference": "union", "anchor": "bottom", "axis": "y", "min": 0.25}),
+                )
+            ],
+        })
+        detector = PrimitiveEventDetector(rules)
+        seat = (2, 200, 200, 100, 100)
+        glove = (0, 180, 180, 80, 50)
+        first = detector.update(frame(0, (3, 200, 100, 80, 100), glove, seat))
+        self.assertEqual({event.rule_id for event in first}, {"left", "lower"})
+        self.assertEqual({event.rule_id: event.evidence["relative_position"] for event in first},
+                         {"left": 0.4, "lower": 0.3})
+
+        current = frame(1, (3, 210, 100, 80, 100), glove, seat)
+        events = detector.update(current)
+        self.assertEqual({(event.rule_id, event.phase) for event in events}, {("left", "ended"), ("right", "started")})
+        self.assertEqual({close.rule_id for close in current.active_close}, {"right", "lower"})
+
+    def test_close_relative_position_rejects_invalid_reference_and_bounds(self):
+        base = {
+            "targets": {"tube": {"class_id": 3}, "seat": {"class_id": 2}},
+            "events": [{"id": "near", "type": "Close", "targets": ["tube", "seat"]}],
+        }
+        for fields in ({"reference": "union", "axis": "y", "max": 0.4},
+                       {"reference": "tube", "axis": "x"},
+                       {"reference": "tube", "axis": "x", "min": 0.8, "max": 0.2}):
+            with self.subTest(fields=fields), self.assertRaises(ValidationError):
+                PrimitiveRules.model_validate({**base, "events": [{**base["events"][0], "relative_position": fields}]})
+
+    def test_close_edge_uses_union_and_keeps_direction_for_same_class(self):
+        rules = PrimitiveRules.model_validate({
+            "targets": {"tube": {"class_id": 3}, "other": {"class_id": 3}, "glove": {"class_id": 0}},
+            "events": [
+                {"id": "left", "type": "Close", "targets": ["tube", "other"], "edge": "left", "hold_ms": 0},
+                {"id": "union", "type": "Close", "targets": ["tube", "other"], "edge": "left", "hold_ms": 0,
+                 "union_with": "glove"},
+            ],
+        })
+        current = frame(0, (3, 100, 100, 40, 40), (3, 165, 100, 40, 40), (0, 145, 100, 35, 40))
+        events = PrimitiveEventDetector(rules).update(current)
+        approaching = [event for event in events if event.rule_id == "union"]
+        self.assertEqual(len(approaching), 1)
+        self.assertEqual(approaching[0].subjects["tube"].track_id, current.detections[1].track_id)
+        self.assertEqual(approaching[0].subjects["other"].track_id, current.detections[0].track_id)
+        self.assertFalse(any(event.rule_id == "left" for event in events))
+        current = frame(0, (3, 100, 100, 40, 40), (3, 145, 100, 40, 40))
+        event, = PrimitiveEventDetector(rules).update(current)
+        self.assertEqual(event.rule_id, "left")
+        self.assertEqual(event.subjects["tube"].track_id, current.detections[1].track_id)
+
+    def test_close_rejects_invalid_or_conflicting_edge(self):
+        base = {
+            "targets": {"tube": {"class_id": 3}, "seat": {"class_id": 2}},
+            "events": [{"id": "near", "type": "Close", "targets": ["tube", "seat"]}],
+        }
+        for fields in ({"edge": "diagonal"}, {"edge": "top", "distance_metric": "center_distance"},
+                       {"edge": "left", "distance_metric": "bottom_edge_gap"}, {"target_edge": "diagonal"},
+                       {"target_edge": "right", "distance_metric": "center_distance"}):
+            with self.subTest(fields=fields), self.assertRaises(ValidationError):
+                PrimitiveRules.model_validate({**base, "events": [{**base["events"][0], **fields}]})
 
     def test_direction_wraps_at_zero_degrees(self):
         rules = PrimitiveRules.model_validate({

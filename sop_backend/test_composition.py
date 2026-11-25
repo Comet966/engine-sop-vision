@@ -78,7 +78,7 @@ class WorkpieceCycleTests(TestCase):
 
 class ParallelTests(TestCase):
     def test_parallel_when_requires_an_active_grip_for_the_same_glove_and_tube(self):
-        rule = next(rule for rule in default_composite_rules().events if rule.id == "held_tube_near_b")
+        rule = next(rule for rule in default_composite_rules().events if rule.id == "held_tube_near_b_top")
         detector = ParallelEventDetector([rule.model_copy(update={"within_cycle": False})])
         tube = TrackedTarget(track_id=1, class_id=3)
         glove = TrackedTarget(track_id=2, class_id=0)

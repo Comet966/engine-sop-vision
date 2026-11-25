@@ -10,7 +10,7 @@ from typing import Literal
 from .cycle import MAX_FRAME_GAP_MS, FrameTime
 from .event_rules import (
     ActiveClose, BoxSize, CloseRule, Edge, InRule, MoveRule, OutRule, PrimitiveEvent, PrimitiveRule,
-    PrimitiveRules, TrackedTarget,
+    PrimitiveRules, RelativePosition, TrackedTarget,
 )
 from .models import Detection, DetectionFrame
 from .tracking import BoxTracker, area, center
@@ -63,20 +63,51 @@ class Proximity:
     started: PrimitiveEvent | None = None
 
 
+@dataclass(frozen=True)
+class CloseMeasurement:
+    distance: float
+    height_ratio: float | None
+    overlap: float | None
+    position: float | None
+    position_matches: bool
+
+
 def bbox_gap(a: Box, b: Box) -> float:
     return hypot(max(0, a[0] - b[2], b[0] - a[2]), max(0, a[1] - b[3], b[1] - a[3]))
 
 
-def close_distance(a: Box, b: Box, metric: str) -> float:
+def box_edge(box: Box, edge: Edge) -> Box:
+    x1, y1, x2, y2 = box
+    return {
+        "left": (x1, y1, x1, y2),
+        "right": (x2, y1, x2, y2),
+        "top": (x1, y1, x2, y1),
+        "bottom": (x1, y2, x2, y2),
+    }[edge]
+
+
+def close_distance(a: Box, b: Box, metric: str, edge: Edge | None = None, target_edge: Edge | None = None) -> float:
     if metric == "center_distance":
         return dist(center(a), center(b))
     if metric == "bottom_edge_gap":
-        a = (a[0], a[3], a[2], a[3])
+        edge = "bottom"
+    if edge is not None:
+        a = box_edge(a, edge)
+    if target_edge is not None:
+        b = box_edge(b, target_edge)
     return bbox_gap(a, b)
 
 
 def enclosing_box(a: Box, b: Box) -> Box:
     return min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])
+
+
+def relative_position(reference_box: Box, target_box: Box, rule: RelativePosition) -> float | None:
+    anchor_box = reference_box if rule.anchor == "center" else box_edge(reference_box, rule.anchor)
+    point = center(anchor_box)
+    axis = 0 if rule.axis == "x" else 1
+    extent = target_box[axis + 2] - target_box[axis]
+    return (point[axis] - target_box[axis]) / extent if extent > 0 else None
 
 
 def bbox_overlap_ratio(a: Box, b: Box) -> float:
@@ -351,11 +382,12 @@ class PrimitiveEventDetector:
         left, right = (self.config.targets[alias] for alias in rule.targets)
         symmetric = (
             left == right and rule.bbox_height_ratio is None and not rule.bbox_sizes
-            and rule.distance_metric != "bottom_edge_gap" and rule.union_with is None
+            and rule.distance_metric != "bottom_edge_gap" and rule.edge is None
+            and rule.target_edge is None and rule.union_with is None and rule.relative_position is None
         )
         diagonal = hypot(frame.width, frame.height)
         min_overlap = rule.min_overlap_ratio or 0
-        distances: dict[tuple[int, ...], tuple[float, float | None, float | None]] = {}
+        distances: dict[tuple[int, ...], CloseMeasurement] = {}
         for pair, distance_box in candidates:
             a, b = pair[:2]
             if a == b or (symmetric and a > b):
@@ -370,8 +402,14 @@ class PrimitiveEventDetector:
                 if not rule.bbox_height_ratio.contains(height_ratio):
                     continue
             overlap = bbox_overlap_ratio(distance_box, box_b) if min_overlap else None
-            distance = close_distance(distance_box, box_b, rule.distance_metric) / diagonal
-            distances[pair] = (distance, height_ratio, overlap)
+            distance = close_distance(distance_box, box_b, rule.distance_metric, rule.edge, rule.target_edge) / diagonal
+            position = None
+            position_matches = True
+            if rule.relative_position is not None:
+                reference_box = box_a if rule.relative_position.reference == rule.targets[0] else distance_box
+                position = relative_position(reference_box, box_b, rule.relative_position)
+                position_matches = position is not None and rule.relative_position.contains(position)
+            distances[pair] = CloseMeasurement(distance, height_ratio, overlap, position, position_matches)
         events = []
         for pair, state in list(states.items()):
             match = distances.get(pair)
@@ -379,7 +417,8 @@ class PrimitiveEventDetector:
             if gap_exceeded(state.dwell.last, now, rule.max_gap_ms, match is not None):
                 reason = "unobserved"
             elif match is not None and (
-                match[0] > rule.exit_distance_ratio or (match[2] is not None and match[2] < min_overlap)
+                match.distance > rule.exit_distance_ratio or not match.position_matches
+                or (match.overlap is not None and match.overlap < min_overlap)
             ):
                 reason = "separated"
             elif match is None:
@@ -389,21 +428,23 @@ class PrimitiveEventDetector:
                     events.append(self._end_close(state, now, reason))
                 del states[pair]
 
-        for pair, (distance, height_ratio, overlap) in distances.items():
-            if overlap is not None and overlap < min_overlap:
+        for pair, match in distances.items():
+            if not match.position_matches or (match.overlap is not None and match.overlap < min_overlap):
                 continue
             state = states.get(pair)
             if state is None:
-                if distance > rule.enter_distance_ratio:
+                if match.distance > rule.enter_distance_ratio:
                     continue
                 state = states[pair] = Proximity(Dwell.begin(now))
             state.dwell.see(now)
             if state.started is None and state.dwell.observed_ms >= rule.hold_ms:
-                evidence = {"distance_ratio": distance, "observed_ms": state.dwell.observed_ms}
-                if height_ratio is not None:
-                    evidence["bbox_height_ratio"] = height_ratio
-                if overlap is not None:
-                    evidence["bbox_overlap_ratio"] = overlap
+                evidence = {"distance_ratio": match.distance, "observed_ms": state.dwell.observed_ms}
+                if match.height_ratio is not None:
+                    evidence["bbox_height_ratio"] = match.height_ratio
+                if match.overlap is not None:
+                    evidence["bbox_overlap_ratio"] = match.overlap
+                if match.position is not None:
+                    evidence["relative_position"] = match.position
                 state.started = self._event(
                     rule, frame, pair, state.dwell.start, now, evidence=evidence,
                 )

@@ -96,7 +96,7 @@ curl -X POST http://127.0.0.1:8000/api/runs \
 | 元事件 | 判定和可调参数 |
 | --- | --- |
 | `Move` | 平滑框中心在 `window_ms` 内达到 `min_displacement_ratio` 后触发；稳定后重新计数。`direction` 可设 `angle_deg` 和 `tolerance_deg`，右、下、左、上分别为 0、90、180、270 度。默认允许任意方向。 |
-| `Close` | `distance_metric` 可选 `bbox_gap`（默认，两框最短间距）、`center_distance`（两框中心距离）或 `bottom_edge_gap`（第一个目标框的下边线到第二个目标框的最短间距）。距离进入 `enter_distance_ratio` 后累计 `hold_ms`，超过 `exit_distance_ratio` 复位。 |
+| `Close` | `distance_metric` 可选 `bbox_gap`（默认，两框最短间距）、`center_distance`（两框中心距离）或兼容旧配置的 `bottom_edge_gap`（第一个框的下边线到第二个框的最短间距）。使用 `bbox_gap` 时，`edge`、`target_edge` 可分别选择第一个和第二个目标框的 `top`、`bottom`、`left` 或 `right` 边线；省略对应字段即使用整个框。可选 `relative_position` 进一步限定相对位置，越出位置范围立即复位。距离进入 `enter_distance_ratio` 后累计 `hold_ms`，超过 `exit_distance_ratio` 复位。 |
 | `In` | 一条新轨迹累计可见 `confirm_ms` 后触发。视频开头已经可见的目标也可确认 `In`。 |
 | `Out` | 最近 `exit_window_ms` 内中心朝边缘移动至少 `min_displacement_ratio`，最后一个框距边缘不超过 `edge_distance_ratio`，随后连续未见满 `missing_ms` 才触发。可用 `edge` 限定方向，`left_edge_x` 设置左侧有效出口。 |
 
@@ -107,6 +107,10 @@ curl -X POST http://127.0.0.1:8000/api/runs \
 可在目标别名下配置 `bbox_size`，根据框在画面里的投影大小筛选证据。`metric` 支持 `height_ratio`（框高 ÷ 画面高，默认）、`width_ratio`（框宽 ÷ 画面宽）和 `area_ratio`（框面积 ÷ 画面面积）。`Close` 还可配置 `bbox_height_ratio`，计算 `targets[0]` 的框高 ÷ `targets[1]` 的框高。两种设置均可只填 `min` 或只填 `max`，同时填写时边界包含在内。
 
 `Move`、`In` 和 `Close` 只使用尺寸达标的框积累证据。`Close` 的框高比超出范围时，当前帧的关系会从 `active_close` 移除。`Out` 只在配置的离场轨迹窗口内检查是否至少有一帧符合目标尺寸。边缘裁切导致框变小后，符合置信度要求的框仍计作可见，消失计时从第一帧未见开始。
+
+### 相对位置
+
+`Close.relative_position` 的 `reference` 使用第一个目标别名，或在定义 `union_with` 时使用 `union` 表示联合框。`anchor` 可选 `center`（默认）与 `top`、`bottom`、`left`、`right`（对应边线的中点）。`axis` 为 `x` 或 `y`，将参考点所选坐标减去第二个目标框的对应起始坐标，再除以该框在该轴上的长度。`min`、`max` 至少设置一个，边界包含在内，允许负值和大于 1 的值以覆盖框外位置。位置条件与距离、置信度和尺寸条件同时满足才累计证据。
 
 默认的吸管靠近 A、B 使用已复核的尺寸参数。单个 `Close` 可通过 `bbox_sizes` 覆盖对应别名的尺寸约束，公共目标仍可使用同一个别名参与并行组合。下面是只启用 A 位接近规则的 `primitive_rules` 示例。
 
@@ -157,7 +161,7 @@ curl -X POST http://127.0.0.1:8000/api/runs \
 | `same_tracks` | 填写跨步骤或分支共享的目标别名，要求相同的轨迹 ID。若各事件的别名不同，在对应引用里用 `bind` 映射为同一个别名。 |
 | `within_cycle` | 默认为 `true`，仅在同一已开始的周期内匹配。 |
 
-默认配置独立上报三种动作。只传自定义 `primitive_rules` 时，周期仍读取默认配置。需要启用命名动作时，可同时提交引用自定义基础事件的 `composite_rules`。
+默认配置独立上报三种通用动作和四种位置相关的除尘动作。只传自定义 `primitive_rules` 时，周期仍读取默认配置。需要启用命名动作时，可同时提交引用自定义基础事件的 `composite_rules`。
 
 | 事件 ID | 确认条件 |
 | --- | --- |
@@ -167,9 +171,9 @@ curl -X POST http://127.0.0.1:8000/api/runs \
 
 握持基础规则的 `min_overlap_ratio` 可按机位调整。三个动作均在对应条件开始成立时确认，后续规则可引用各自的 ID。
 
-`held_tube_near_a` 和 `held_tube_near_b` 要求握持与对应工件接近的证据连续重叠 60 毫秒，且两项证据对应同一对手套和吸管轨迹。握持按手套框与吸管框的中心距离判断，进入和退出阈值分别为画面对角线的 12% 和 14%。框交集至少占较小框面积的 25%（A 位组合）或 30%（单独握持和 B 位组合）。
+`held_tube_near_a_left`、`held_tube_near_a_right`、`held_tube_near_b_top` 和 `held_tube_near_b_bottom` 要求握持与对应工件位置接近的证据连续重叠 60 毫秒，且两项证据对应同一对手套和吸管轨迹。这四个规则替代原来的 A、B 整框除尘事件。握持按手套框与吸管框的中心距离判断，进入和退出阈值分别为画面对角线的 12% 和 14%。框交集至少占较小框面积的 25%（A 位组合）或 30%（单独握持和 B 位组合）。
 
-靠近规则用 `"targets": ["tube", "seat_a"]`、`"union_with": "glove"`、`"distance_metric": "bottom_edge_gap"` 表达联合几何。`union_with` 是检测目标别名。`Close` 每帧用符合置信度和尺寸筛选的手套框与吸管框构造最小外接矩形，并测量其下边线到工件框的最短间距。`bbox_height_ratio` 使用 `targets` 中两个原始框的高度。A 位累计 150 毫秒，B 位累计 125 毫秒。
+靠近规则使用 `"union_with": "glove"`、`"distance_metric": "bbox_gap"` 和 `"edge": "bottom"`，测量手套与吸管联合框下边线到工件完整框的最短间距。再用 `relative_position` 区分位置：A 左、右分别要求吸管框中心的相对 X ≤ 0.30 和 ≥ 0.40，累计 150 毫秒；B 较高、较低位置分别要求联合框下边线的相对 Y ≤ 0.08 和 ≥ 0.11，累计 60 和 100 毫秒。A 的距离进入/退出阈值为 0.015/0.025、框高比上限 3.25；B 的距离阈值为 0.025/0.035。B 的两个位置为当前机位标定的投影位置，需要结合实际工艺验证其物理含义。不同轨迹的匹配可能分别满足不同位置条件。
 
 靠近独立累计证据。组合规则用 `all` 引用靠近规则，用 `when` 引用握持规则，用 `"same_tracks": ["tube", "glove"]` 确保两者使用同一对轨迹。靠近证据可以在握持确认前开始累计，吸工件事件须等握持确认且满足重叠时长才触发。
 
