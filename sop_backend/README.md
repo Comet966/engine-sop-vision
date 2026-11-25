@@ -96,7 +96,7 @@ curl -X POST http://127.0.0.1:8000/api/runs \
 | 元事件 | 判定和可调参数 |
 | --- | --- |
 | `Move` | 平滑框中心在 `window_ms` 内达到 `min_displacement_ratio` 后触发；稳定后重新计数。`direction` 可设 `angle_deg` 和 `tolerance_deg`，右、下、左、上分别为 0、90、180、270 度。默认允许任意方向。 |
-| `Close` | 两框最短间距进入 `enter_distance_ratio` 后累计 `hold_ms`，超过 `exit_distance_ratio` 复位。两框重叠时间距为 0。每对轨迹独立计算。 |
+| `Close` | `distance_metric` 可选 `bbox_gap`（默认，两框最短间距）、`center_distance`（两框中心距离）或 `bottom_edge_gap`（第一个目标框的下边线到第二个目标框的最短间距）。距离进入 `enter_distance_ratio` 后累计 `hold_ms`，超过 `exit_distance_ratio` 复位。 |
 | `In` | 一条新轨迹累计可见 `confirm_ms` 后触发。视频开头已经可见的目标也可确认 `In`。 |
 | `Out` | 最近 `exit_window_ms` 内中心朝边缘移动至少 `min_displacement_ratio`，最后一个框距边缘不超过 `edge_distance_ratio`，随后连续未见满 `missing_ms` 才触发。可用 `edge` 限定方向，`left_edge_x` 设置左侧有效出口。 |
 
@@ -152,7 +152,8 @@ curl -X POST http://127.0.0.1:8000/api/runs \
 | `id` | 组合事件唯一 ID，供订阅及后续规则引用。 |
 | `op: "event"` | 用 `event` 引用单个基础事件或已定义的组合事件，为它定义一个可复用的名称。以 `Close.started` 为接近确认。 |
 | `op: "sequence"` | 用 `steps` 写顺序，用 `within_ms` 限制第一步到最后一步的确认时间。相邻步骤须在不同帧按顺序确认。可引用基础事件或数组中已定义的组合事件。 |
-| `op: "parallel"` | 用 `all` 引用同时成立的 `Close`，用 `min_overlap_ms` 设连续重叠时长。 |
+| `op: "parallel"` | 用 `all` 写主要的 `Close` 证据，用可选的 `when` 写附加条件。用 `min_overlap_ms` 设全部证据的连续重叠时长。 |
+| `when` | 并行规则的条件列表。每项用 `{"event": "基础 Close 规则 ID"}` 引用当帧已确认且有效的 `Close`，支持 `bind`。列表内条件均须满足，轨迹绑定和时间判据与 `all` 一起校验。 |
 | `same_tracks` | 填写跨步骤或分支共享的目标别名，要求相同的轨迹 ID。若各事件的别名不同，在对应引用里用 `bind` 映射为同一个别名。 |
 | `within_cycle` | 默认为 `true`，仅在同一已开始的周期内匹配。 |
 
@@ -166,7 +167,11 @@ curl -X POST http://127.0.0.1:8000/api/runs \
 
 握持基础规则的 `min_overlap_ratio` 可按机位调整。三个动作均在对应条件开始成立时确认，后续规则可引用各自的 ID。
 
-`held_tube_near_a` 和 `held_tube_near_b` 要求握持与对应工件接近的证据同时成立，且使用同一条吸管轨迹。握持仍采用原有重叠阈值。组合专用的接近规则将有效观察时间设为 150 毫秒，A 的吸管框宽下限为 0.10，B 的吸管框高下限为 0.28，框高比下限均为 1.5。两项条件连续重叠 60 毫秒后触发。阈值是根据两段录像的试验值。
+`held_tube_near_a` 和 `held_tube_near_b` 要求握持与对应工件接近的证据连续重叠 60 毫秒，且两项证据对应同一对手套和吸管轨迹。握持按手套框与吸管框的中心距离判断，进入和退出阈值分别为画面对角线的 12% 和 14%。框交集至少占较小框面积的 25%（A 位组合）或 30%（单独握持和 B 位组合）。
+
+靠近规则用 `"targets": ["tube", "seat_a"]`、`"union_with": "glove"`、`"distance_metric": "bottom_edge_gap"` 表达联合几何。`union_with` 是检测目标别名。`Close` 每帧用符合置信度和尺寸筛选的手套框与吸管框构造最小外接矩形，并测量其下边线到工件框的最短间距。`bbox_height_ratio` 使用 `targets` 中两个原始框的高度。A 位累计 150 毫秒，B 位累计 125 毫秒。
+
+靠近独立累计证据。组合规则用 `all` 引用靠近规则，用 `when` 引用握持规则，用 `"same_tracks": ["tube", "glove"]` 确保两者使用同一对轨迹。靠近证据可以在握持确认前开始累计，吸工件事件须等握持确认且满足重叠时长才触发。
 
 下面是并行与顺序的语法示例。三个占位 ID 应替换为实际定义的规则 ID。
 

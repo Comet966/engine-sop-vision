@@ -183,7 +183,7 @@ class ParallelEventDetector:
     ) -> list[ParallelEvent]:
         cycle_id = cycle.cycle_id if cycle else None
         matches = [ParallelMatch({}, (cycle.start_ms or 0) if cycle else 0)]
-        for term in rule.all:
+        for term in rule.terms:
             joined = []
             for close in active[term.event]:
                 subjects = {term.bind.get(alias, alias): target for alias, target in close.subjects.items()}

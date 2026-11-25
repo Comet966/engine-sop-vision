@@ -62,21 +62,28 @@ class MoveRule(SingleTargetRule):
 class CloseRule(EventRule):
     type: Literal["Close"]
     targets: tuple[str, str]
-    distance_metric: Literal["bbox_gap"] = "bbox_gap"
+    distance_metric: Literal["bbox_gap", "center_distance", "bottom_edge_gap"] = "bbox_gap"
     enter_distance_ratio: float = Field(default=0.015, ge=0, le=1)
     exit_distance_ratio: float = Field(default=0.025, gt=0, le=1)
     hold_ms: int = Field(default=300, ge=0, le=30000)
     bbox_height_ratio: SizeRange | None = None
     bbox_sizes: dict[str, BoxSize] = Field(default_factory=dict)
     min_overlap_ratio: float | None = Field(default=None, gt=0, le=1)
+    union_with: str | None = Field(default=None, min_length=1)
+
+    @property
+    def subject_aliases(self) -> tuple[str, ...]:
+        return (*self.targets, self.union_with) if self.union_with else self.targets
 
     @model_validator(mode="after")
     def validate_pair(self) -> "CloseRule":
         if self.targets[0] == self.targets[1]:
             raise ValueError("Close requires two distinct target aliases")
+        if self.union_with in self.targets:
+            raise ValueError("Close union_with must be distinct from the two distance targets")
         if self.exit_distance_ratio <= self.enter_distance_ratio:
             raise ValueError("Close exit_distance_ratio must exceed enter_distance_ratio")
-        if self.bbox_sizes.keys() - set(self.targets):
+        if self.bbox_sizes.keys() - set(self.subject_aliases):
             raise ValueError("Close bbox_sizes must reference the rule's target aliases")
         return self
 
@@ -133,10 +140,21 @@ def resolve_subjects(
 class ParallelRule(RuleModel):
     id: str = Field(min_length=1, max_length=128)
     op: Literal["parallel"] = "parallel"
-    all: list[EventReference] = Field(min_length=2, max_length=8)
+    all: list[EventReference] = Field(min_length=1, max_length=8)
+    when: list[EventReference] = Field(default_factory=list, max_length=7)
     same_tracks: list[str] = Field(default_factory=list)
     min_overlap_ms: int = Field(default=120, ge=0, le=30000)
     within_cycle: bool = True
+
+    @property
+    def terms(self) -> list[EventReference]:
+        return [*self.all, *self.when]
+
+    @model_validator(mode="after")
+    def validate_terms(self) -> "ParallelRule":
+        if not 2 <= len(self.terms) <= 8:
+            raise ValueError("Parallel all and when must have 2 to 8 branches in total")
+        return self
 
 
 class CycleRules(RuleModel):
@@ -156,15 +174,17 @@ class PrimitiveRules(RuleModel):
     @model_validator(mode="after")
     def validate_references(self) -> "PrimitiveRules":
         seen = set()
+        close: dict[str, CloseRule] = {}
         for rule in self.events:
             if rule.id in seen:
                 raise ValueError(f"Duplicate event id: {rule.id}")
             seen.add(rule.id)
-            targets = rule.targets if isinstance(rule, CloseRule) else (rule.target,)
+            targets = rule.subject_aliases if isinstance(rule, CloseRule) else (rule.target,)
             for target in targets:
                 if target not in self.targets:
                     raise ValueError(f"Unknown target {target!r} in {rule.id!r}")
-        close = {rule.id: rule for rule in self.events if isinstance(rule, CloseRule)}
+            if isinstance(rule, CloseRule):
+                close[rule.id] = rule
         for rule in self.parallel:
             if rule.id in seen:
                 raise ValueError(f"Duplicate event id: {rule.id}")
@@ -173,14 +193,15 @@ class PrimitiveRules(RuleModel):
         return self
 
     def validate_parallel(self, rule: ParallelRule, close: dict[str, CloseRule]) -> dict[str, int]:
-        if len({term.event for term in rule.all}) != len(rule.all):
+        terms = rule.terms
+        if len({term.event for term in terms}) != len(terms):
             raise ValueError(f"Duplicate branch in {rule.id!r}")
         available = {}
-        for term in rule.all:
+        for term in terms:
             if term.event not in close:
                 raise ValueError(f"Parallel branch {term.event!r} must name a Close rule")
-            available[term.event] = {alias: self.targets[alias].class_id for alias in close[term.event].targets}
-        return resolve_subjects(rule.all, rule.same_tracks, available)
+            available[term.event] = {alias: self.targets[alias].class_id for alias in close[term.event].subject_aliases}
+        return resolve_subjects(terms, rule.same_tracks, available)
 
 
 def default_primitive_rules() -> PrimitiveRules:

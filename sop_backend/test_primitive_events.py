@@ -29,8 +29,8 @@ class PrimitiveEventTests(TestCase):
             boxes = []
             if index < 20:
                 x = max(7, 124 - max(0, index - 10) * 13)
-                sizes = [(36, 36), (36, 90), (36, 90), (130, 216)]
-                boxes = [(category, x, (200, 210, 220, 215)[category], *size) for category, size in enumerate(sizes)]
+                sizes = [(36, 150), (36, 90), (36, 90), (130, 216)]
+                boxes = [(category, x, (200, 350, 355, 215)[category], *size) for category, size in enumerate(sizes)]
             events.extend(engine.update(frame(index, *boxes)))
 
         self.assertEqual(
@@ -40,6 +40,47 @@ class PrimitiveEventTests(TestCase):
         for event in events:
             for ref in event.subjects.values():
                 self.assertEqual(ref.track_id, ref.class_id + 1)
+
+    def test_close_distance_uses_the_selected_geometry(self):
+        rules = PrimitiveRules.model_validate({
+            "targets": {"tube": {"class_id": 3}, "seat": {"class_id": 2}},
+            "events": [
+                {"id": metric, "type": "Close", "targets": ["tube", "seat"],
+                 "distance_metric": metric, "hold_ms": 0}
+                for metric in ("bbox_gap", "center_distance", "bottom_edge_gap")
+            ],
+        })
+        tube = (3, 100, 100, 40, 160)
+        fixtures = [
+            ((2, 100, 160, 40, 40), {"bbox_gap", "center_distance"}),
+            ((2, 133, 245, 40, 40), {"bbox_gap", "bottom_edge_gap"}),
+        ]
+        for seat, expected in fixtures:
+            with self.subTest(seat=seat):
+                events = PrimitiveEventDetector(rules).update(frame(0, tube, seat))
+                self.assertEqual({event.rule_id for event in events}, expected)
+
+    def test_close_union_uses_visible_boxes_without_a_grip_event(self):
+        rules = PrimitiveRules.model_validate({
+            "targets": {"tube": {"class_id": 3}, "seat": {"class_id": 2}, "glove": {"class_id": 0}},
+            "events": [
+                {"id": "suction", "type": "Close", "targets": ["tube", "seat"],
+                 "distance_metric": "bottom_edge_gap", "hold_ms": 0,
+                 "union_with": "glove"},
+            ],
+        })
+        detector = PrimitiveEventDetector(rules)
+        tube, glove = (3, 100, 50, 40, 150), (0, 100, 175, 40, 85)
+        seat = (2, 100, 260)
+        self.assertEqual(detector.update(frame(0, tube, seat)), [])
+        current = frame(1, tube, glove, seat)
+        suction, = detector.update(current)
+        self.assertEqual(suction.evidence["distance_ratio"], 0)
+        self.assertEqual(suction.subjects["glove"].track_id, current.detections[1].track_id)
+        self.assertEqual(suction.subjects["tube"].track_id, current.detections[0].track_id)
+        current = frame(2, tube, seat)
+        detector.update(current)
+        self.assertEqual(current.active_close, [])
 
     def test_direction_wraps_at_zero_degrees(self):
         rules = PrimitiveRules.model_validate({

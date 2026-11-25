@@ -134,7 +134,7 @@ def resolve_rules(
     composite_events = [*base.parallel, *config.events]
     subjects = {
         rule.id: {alias: targets[alias].class_id for alias in (
-            rule.targets if isinstance(rule, CloseRule) else (rule.target,)
+            rule.subject_aliases if isinstance(rule, CloseRule) else (rule.target,)
         )}
         for rule in primitives.events
     }

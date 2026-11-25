@@ -41,14 +41,13 @@
       "op": "parallel",
       "all": [
         {
-          "event": "glove_overlaps_tube"
-        },
-        {
           "event": "held_tube_close_seat_a"
         }
       ],
+      "when": [{"event": "glove_overlaps_tube_for_workpiece_a"}],
       "same_tracks": [
-        "tube"
+        "tube",
+        "glove"
       ],
       "min_overlap_ms": 60
     },
@@ -57,14 +56,13 @@
       "op": "parallel",
       "all": [
         {
-          "event": "glove_overlaps_tube"
-        },
-        {
           "event": "held_tube_close_seat_b"
         }
       ],
+      "when": [{"event": "glove_overlaps_tube"}],
       "same_tracks": [
-        "tube"
+        "tube",
+        "glove"
       ],
       "min_overlap_ms": 60
     }

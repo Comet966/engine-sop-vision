@@ -106,7 +106,20 @@
         "glove",
         "tube"
       ],
+      "distance_metric": "center_distance",
+      "enter_distance_ratio": 0.12,
+      "exit_distance_ratio": 0.14,
       "min_overlap_ratio": 0.3,
+      "hold_ms": 300
+    },
+    {
+      "id": "glove_overlaps_tube_for_workpiece_a",
+      "type": "Close",
+      "targets": ["glove", "tube"],
+      "distance_metric": "center_distance",
+      "enter_distance_ratio": 0.12,
+      "exit_distance_ratio": 0.14,
+      "min_overlap_ratio": 0.25,
       "hold_ms": 300
     },
     {
@@ -158,6 +171,8 @@
     {
       "id": "held_tube_close_seat_a",
       "type": "Close",
+      "distance_metric": "bottom_edge_gap",
+      "union_with": "glove",
       "targets": [
         "tube",
         "seat_a"
@@ -178,6 +193,8 @@
     {
       "id": "held_tube_close_seat_b",
       "type": "Close",
+      "distance_metric": "bottom_edge_gap",
+      "union_with": "glove",
       "targets": [
         "tube",
         "seat_b"
@@ -193,7 +210,7 @@
         "min": 1.5,
         "max": 3.6
       },
-      "hold_ms": 150
+      "hold_ms": 125
     }
   ]
 }

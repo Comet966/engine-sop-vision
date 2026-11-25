@@ -77,6 +77,37 @@ class WorkpieceCycleTests(TestCase):
 
 
 class ParallelTests(TestCase):
+    def test_parallel_when_requires_an_active_grip_for_the_same_glove_and_tube(self):
+        rule = next(rule for rule in default_composite_rules().events if rule.id == "held_tube_near_b")
+        detector = ParallelEventDetector([rule.model_copy(update={"within_cycle": False})])
+        tube = TrackedTarget(track_id=1, class_id=3)
+        glove = TrackedTarget(track_id=2, class_id=0)
+        seat = TrackedTarget(track_id=3, class_id=2)
+        near = ActiveClose(rule_id=rule.all[0].event, occurrence_id="near:1", evidence_start_ms=0,
+                           subjects={"tube": tube, "glove": glove, "seat_b": seat})
+        grip = ActiveClose(rule_id=rule.when[0].event, occurrence_id="grip:1", evidence_start_ms=80,
+                           subjects={"tube": tube, "glove": glove})
+
+        def observe(index, *conditions):
+            current = frame(index)
+            current.active_close = [near, *conditions]
+            return detector.update(current, None)
+
+        self.assertEqual(observe(0), [])
+        self.assertEqual(observe(1), [])
+        self.assertEqual(observe(2, grip), [])
+        other_glove = TrackedTarget(track_id=4, class_id=0)
+        wrong_grip = grip.model_copy(update={"subjects": {"tube": tube, "glove": other_glove}})
+        self.assertEqual(observe(3, wrong_grip), [])
+        self.assertEqual(observe(4, wrong_grip), [])
+        resumed_grip = grip.model_copy(update={"evidence_start_ms": 200})
+        self.assertEqual(observe(5, resumed_grip), [])
+        self.assertEqual(observe(6, resumed_grip), [])
+        combined, = observe(7, resumed_grip)
+        self.assertEqual(combined.evidence_ids, ["near:1", "grip:1"])
+        self.assertEqual(observe(8), [])
+        self.assertFalse(detector.fired[rule.id])
+
     def test_parallel_requires_shared_track_and_restarts_after_evidence_gap(self):
         rules = PrimitiveRules.model_validate({
             "targets": {"glove": {"class_id": 0}, "tube": {"class_id": 3},

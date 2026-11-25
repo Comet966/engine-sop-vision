@@ -1,6 +1,7 @@
 """Detect motion, proximity, entry and exit from sequential YOLO frames."""
 
 from collections import defaultdict, deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from itertools import product
 from math import atan2, degrees, dist, hypot
@@ -66,6 +67,18 @@ def bbox_gap(a: Box, b: Box) -> float:
     return hypot(max(0, a[0] - b[2], b[0] - a[2]), max(0, a[1] - b[3], b[1] - a[3]))
 
 
+def close_distance(a: Box, b: Box, metric: str) -> float:
+    if metric == "center_distance":
+        return dist(center(a), center(b))
+    if metric == "bottom_edge_gap":
+        a = (a[0], a[3], a[2], a[3])
+    return bbox_gap(a, b)
+
+
+def enclosing_box(a: Box, b: Box) -> Box:
+    return min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])
+
+
 def bbox_overlap_ratio(a: Box, b: Box) -> float:
     width = max(0, min(a[2], b[2]) - max(a[0], b[0]))
     height = max(0, min(a[3], b[3]) - max(a[1], b[1]))
@@ -128,7 +141,7 @@ class PrimitiveEventDetector:
         self.entries: dict[str, dict[int, Dwell]] = defaultdict(dict)
         self.entered: dict[str, set[int]] = defaultdict(set)
         self.departures: dict[str, dict[int, Departure]] = defaultdict(dict)
-        self.proximity: dict[str, dict[tuple[int, int], Proximity]] = defaultdict(dict)
+        self.proximity: dict[str, dict[tuple[int, ...], Proximity]] = defaultdict(dict)
 
     def update(self, frame: DetectionFrame) -> list[PrimitiveEvent]:
         events = []
@@ -156,7 +169,23 @@ class PrimitiveEventDetector:
                     self._size_matches(target, self._eligible(rule, target, visible), frame, rule.bbox_sizes.get(target))
                     for target in rule.targets
                 )
-                events.extend(self._close(rule, first, second, frame, now))
+                if rule.union_with:
+                    union = rule.union_with
+                    partners = self._size_matches(
+                        union, self._eligible(rule, union, visible), frame, rule.bbox_sizes.get(union),
+                    )
+                    unions = {
+                        (a, partner): enclosing_box(box.bbox_xyxy, added.bbox_xyxy)
+                        for (a, box), (partner, added) in product(first.items(), partners.items())
+                        if a != partner
+                    }
+                    candidates = (
+                        ((a, b, partner), box)
+                        for ((a, partner), box), b in product(unions.items(), second) if b != partner
+                    )
+                else:
+                    candidates = (((a, b), first[a].bbox_xyxy) for a, b in product(first, second))
+                events.extend(self._close(rule, first, second, candidates, frame, now))
             else:
                 boxes = self._eligible(rule, rule.target, visible)
                 sized = self._size_matches(rule.target, boxes, frame)
@@ -190,7 +219,7 @@ class PrimitiveEventDetector:
         now: FrameTime, *, end: FrameTime | None = None, evidence: dict[str, int | float | str] | None = None,
     ) -> PrimitiveEvent:
         self.sequence += 1
-        targets = rule.targets if isinstance(rule, CloseRule) else (rule.target,)
+        targets = rule.subject_aliases if isinstance(rule, CloseRule) else (rule.target,)
         return PrimitiveEvent(
             event=rule.type, phase="started" if end is None else "detected", run_id=frame.run_id,
             sequence=self.sequence, rule_id=rule.id, occurrence_id=f"{frame.run_id}:{self.sequence}",
@@ -315,15 +344,20 @@ class PrimitiveEventDetector:
 
     def _close(
         self, rule: CloseRule, first: dict[int, Detection], second: dict[int, Detection],
+        candidates: Iterable[tuple[tuple[int, ...], Box]],
         frame: DetectionFrame, now: FrameTime,
     ) -> list[PrimitiveEvent]:
         states = self.proximity[rule.id]
         left, right = (self.config.targets[alias] for alias in rule.targets)
-        symmetric = left == right and rule.bbox_height_ratio is None and not rule.bbox_sizes
+        symmetric = (
+            left == right and rule.bbox_height_ratio is None and not rule.bbox_sizes
+            and rule.distance_metric != "bottom_edge_gap" and rule.union_with is None
+        )
         diagonal = hypot(frame.width, frame.height)
         min_overlap = rule.min_overlap_ratio or 0
-        distances: dict[tuple[int, int], tuple[float, float | None, float | None]] = {}
-        for a, b in product(first, second):
+        distances: dict[tuple[int, ...], tuple[float, float | None, float | None]] = {}
+        for pair, distance_box in candidates:
+            a, b = pair[:2]
             if a == b or (symmetric and a > b):
                 continue
             box_a, box_b = first[a].bbox_xyxy, second[b].bbox_xyxy
@@ -335,8 +369,9 @@ class PrimitiveEventDetector:
                 height_ratio = (box_a[3] - box_a[1]) / height_b
                 if not rule.bbox_height_ratio.contains(height_ratio):
                     continue
-            overlap = bbox_overlap_ratio(box_a, box_b) if min_overlap else None
-            distances[a, b] = (bbox_gap(box_a, box_b) / diagonal, height_ratio, overlap)
+            overlap = bbox_overlap_ratio(distance_box, box_b) if min_overlap else None
+            distance = close_distance(distance_box, box_b, rule.distance_metric) / diagonal
+            distances[pair] = (distance, height_ratio, overlap)
         events = []
         for pair, state in list(states.items()):
             match = distances.get(pair)
